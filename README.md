@@ -1,6 +1,6 @@
 # Multi-Persona Thinking for Bias Mitigation in Large Language Models
 
-[![Venue: ACL Findings 2026](https://img.shields.io/badge/Venue-ACL%20Findings%202026-blue)](https://2026.aclweb.org/)
+[![Venue: ACL Findings 2026](https://img.shields.io/badge/Venue-ACL%20Findings%202026-blue)](https://aclanthology.org/2026.findings-acl.1389/)
 
 ## Setup
 
@@ -20,10 +20,23 @@ bash scripts/run.sh
 ## Citation
 
 ```bibtex
-@inproceedings{chen2026mpt,
-  title={Multi-Persona Thinking for Bias Mitigation in Large Language Models},
-  author={Yuxing Chen, Guoqing Luo, Zijun Wu, Lili Mou},
-  booktitle={Findings of the Association for Computational Linguistics: ACL 2026},
-  year={2026}
+@inproceedings{chen-etal-2026-multi,
+    title = "Multi-Persona Thinking for Bias Mitigation in Large Language Models",
+    author = "Chen, Yuxing  and
+      Luo, Guoqing  and
+      Wu, Zijun  and
+      Mou, Lili",
+    editor = "Liakata, Maria  and
+      Moreira, Viviane P.  and
+      Zhang, Jiajun  and
+      Jurgens, David",
+    booktitle = "Findings of the {A}ssociation for {C}omputational {L}inguistics: {ACL} 2026",
+    month = jul,
+    year = "2026",
+    address = "San Diego, California, United States",
+    publisher = "Association for Computational Linguistics",
+    url = "https://aclanthology.org/2026.findings-acl.1389/",
+    pages = "27895--27909",
+    ISBN = "979-8-89176-395-1",
 }
 ```
