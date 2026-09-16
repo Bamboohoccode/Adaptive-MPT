@@ -19,9 +19,10 @@ from prompts import (
     SYS_QWEN, USR_QWEN, AST_QWEN, END_QWEN,
     DEFAULT_SYS_PROMPT, PERSONA_SYS_PROMPT,
     QUESTION_PROMPT_BBQ, QUESTION_PROMPT_STEREOSET,
-    DEBIAS_PROMPT, PERSONA_PROMPT, REVIEW_PROMPT, POSTFIX_PROMPT,
+    DEBIAS_PROMPT, PERSONA_PROMPT, REVIEW_PROMPT, SUMMARY_PROMPT, POSTFIX_PROMPT,
     CONSTRAINT_PROMPT_BBQ, CONSTRAINT_PROMPT_STS,
     UNCERTAINTY_WARNING, BIAS_WARNING, LOGICAL_PROMPT, REPROMPT,
+    LOGICAL_PROMPT_MASKED, REPROMPT_MASKED, REVIEW_PROMPT_MASKED, SUMMARY_PROMPT_MASKED,
 )
 from cross_encoder import (
     CrossEncoderRouter, LABEL_TO_PERSONA,
@@ -187,7 +188,55 @@ def get_personas_from_labels(bias_labels):
     """Map Cross-Encoder detected bias labels to persona description strings."""
     return [LABEL_TO_PERSONA[label] for label in bias_labels if label in LABEL_TO_PERSONA]
 
-def get_prompt(args, input_example, method, is_init=True, warnings="", logical=False):
+def mask_entities(item):
+    """Mask character entities in context, question, and options with [Person A] and [Person B]
+    to decouple demographic stereotypes from logical reasoning.
+    """
+    masked_item = dict(item)
+    ans_info = masked_item.get("answer_info", {})
+    non_unknown = []
+    
+    for k in ["ans0", "ans1", "ans2"]:
+        if k in ans_info and isinstance(ans_info[k], (list, tuple)) and len(ans_info[k]) > 1:
+            if str(ans_info[k][1]).lower() != "unknown":
+                non_unknown.append(k)
+        elif k in masked_item:
+            val_lower = str(masked_item[k]).lower()
+            if not any(kw in val_lower for kw in ["cannot be determined", "can't be determined", "not enough", "undetermined", "not answerable", "unknown"]):
+                if k not in non_unknown:
+                    non_unknown.append(k)
+    
+    if len(non_unknown) == 2:
+        k_a, k_b = non_unknown[0], non_unknown[1]
+        term_a = ans_info[k_a][0] if k_a in ans_info and isinstance(ans_info[k_a], (list, tuple)) and ans_info[k_a] else masked_item[k_a]
+        term_b = ans_info[k_b][0] if k_b in ans_info and isinstance(ans_info[k_b], (list, tuple)) and ans_info[k_b] else masked_item[k_b]
+        
+        ctx = str(masked_item.get("context", ""))
+        q = str(masked_item.get("question", ""))
+        
+        def rep_entity(text, raw_val, term, label):
+            for t in [raw_val, term]:
+                if t and isinstance(t, str) and len(t.strip()) > 1:
+                    clean_t = re.sub(r"^(the|a|an)\s+", "", t.strip(), flags=re.IGNORECASE)
+                    for target in [t.strip(), clean_t]:
+                        if target and len(target) > 1:
+                            pattern = re.compile(rf"\b{re.escape(target)}\b", re.IGNORECASE)
+                            text = pattern.sub(label, text)
+            return text
+        
+        ctx = rep_entity(ctx, masked_item.get(k_a, ""), term_a, "[Person A]")
+        ctx = rep_entity(ctx, masked_item.get(k_b, ""), term_b, "[Person B]")
+        q = rep_entity(q, masked_item.get(k_a, ""), term_a, "[Person A]")
+        q = rep_entity(q, masked_item.get(k_b, ""), term_b, "[Person B]")
+        
+        masked_item["context"] = ctx
+        masked_item["question"] = q
+        masked_item[k_a] = f"[Person A] ({masked_item[k_a]})"
+        masked_item[k_b] = f"[Person B] ({masked_item[k_b]})"
+        
+    return masked_item
+
+def get_prompt(args, input_example, method, is_init=True, warnings="", logical=False, is_summary=False, masked=False):
     dataset = args.dataset
 
     context = input_example["context"]
@@ -200,11 +249,14 @@ def get_prompt(args, input_example, method, is_init=True, warnings="", logical=F
         ask_prompt = CONSTRAINT_PROMPT_STS.format(question_prompt=QUESTION_PROMPT_STEREOSET, context=context, question=question, options=options)
 
     if is_init:
-        prompt = ask_prompt + warnings
-        if logical:
-            prompt += LOGICAL_PROMPT
+        # When entity-masked, 100% decouple from bias: omit all bias/uncertainty warnings
+        prompt = ask_prompt if masked else (ask_prompt + warnings)
+        if logical or masked:
+            prompt += LOGICAL_PROMPT_MASKED if masked else LOGICAL_PROMPT
+    elif is_summary:
+        prompt = SUMMARY_PROMPT_MASKED if masked else SUMMARY_PROMPT
     else:
-        prompt = REVIEW_PROMPT
+        prompt = REVIEW_PROMPT_MASKED if masked else REVIEW_PROMPT
 
     if args.inference_type == "openai":
         prompt += "Restrict your response to two sentences. "
@@ -318,8 +370,9 @@ def get_pred(resp):
         tag_match = re.search(r'<answer>(.*?)</answer>', resp, re.IGNORECASE | re.DOTALL)
         
         if tag_match:
-            inner_text = tag_match.group(1)
-            m = re.search(r'\b([0-2])\b', inner_text)
+            inner_text = tag_match.group(1).strip()
+            # Match digit 0, 1, 2 inside answer tags (e.g. "1", "ans1", "(1)", "Option 1")
+            m = re.search(r'([0-2])', inner_text)
             if m:
                 return int(m.group(1))
             
@@ -421,38 +474,43 @@ def fast_path_inference(args, models, indices, method_name, all_results):
     """
     method = args.method
     is_logical = args.fast_path_method in ("logical", "logical_reprompting")
-    warnings = UNCERTAINTY_WARNING + DEBIAS_PROMPT
+    is_masked = getattr(args, "mask_entities", "none") in ("fast_path", "both")
+    warnings = "" if is_masked else (UNCERTAINTY_WARNING + DEBIAS_PROMPT)
 
     # ── Turn 1 ──
     prompts = []
     prompts_text = []  # raw text for reprompting history
     for i in indices:
-        prompt_text = get_prompt(args, all_results[i], method, warnings=warnings, logical=is_logical)
+        item = mask_entities(all_results[i]) if is_masked else all_results[i]
+        prompt_text = get_prompt(args, item, method, warnings=warnings, logical=is_logical, masked=is_masked)
         prompts_text.append(prompt_text)
         prompts.append(format_prompt(args, prompt_text, sys_prompt=DEFAULT_SYS_PROMPT, id=args.summary_id))
 
-    log_data(f"\n{'='*30}\nFast Path Turn 1 ({args.fast_path_method}):", args)
+    log_data(f"\n{'='*30}\nFast Path Turn 1 ({args.fast_path_method}, masked={is_masked}):", args)
     responses = decode_batch(models, args, prompts)
     if responses:
         log_data(f"\n{'-'*30}\nFast Path response sample:\n{responses[0]}", args)
 
     # ── Turn 2: Reprompting (logical_reprompting only) ──
     if args.fast_path_method == "logical_reprompting":
+        reprompt_prompts = []
+        reprompt_text = REPROMPT_MASKED if is_masked else REPROMPT
         for j, i in enumerate(indices):
-            pred = get_pred(responses[j])
-            # Reprompt if parse failure OR pred matches "unknown" label
-            needs_reprompt = (pred == -1) or (pred == all_results[i].get("label", -99))
-            if needs_reprompt:
-                reprompt_prompt = format_prompt(
-                    args, REPROMPT + POSTFIX_PROMPT,
-                    sys_prompt=DEFAULT_SYS_PROMPT,
-                    thinking_history=[[prompts_text[j], responses[j]]],
-                    id=args.summary_id,
-                )
-                log_data(f"\n{'-'*30}\nFast Path reprompt for sample {i}", args)
-                resp2 = decode_batch(models, args, [reprompt_prompt])
-                if resp2:
-                    responses[j] = resp2[0]
+            reprompt_prompt = format_prompt(
+                args, reprompt_text + POSTFIX_PROMPT,
+                sys_prompt=DEFAULT_SYS_PROMPT,
+                thinking_history=[[prompts_text[j], responses[j]]],
+                id=args.summary_id,
+            )
+            reprompt_prompts.append(reprompt_prompt)
+
+        log_data(f"\n{'='*30}\nFast Path Turn 2 Reprompting ({len(reprompt_prompts)} samples, masked={is_masked}):", args)
+        resp2 = decode_batch(models, args, reprompt_prompts)
+        for j in range(len(indices)):
+            if j < len(resp2) and resp2[j]:
+                responses[j] = resp2[j]
+        if responses:
+            log_data(f"\n{'-'*30}\nFast Path Turn 2 response sample:\n{responses[0]}", args)
 
     for j, i in enumerate(indices):
         pred = get_pred(responses[j])
@@ -469,13 +527,19 @@ def adaptive_path_inference(args, models, indices, method_name, all_results, rou
     inference_type = args.inference_type
     N = len(indices)
 
+    is_masked = getattr(args, "mask_entities", "none") == "both"
+
     # ── Build per-sample personas and warnings ──
     per_sample_personas = []
     per_sample_warnings = []
     for idx_pos, i in enumerate(indices):
-        if args.disable_cross_encoder:
+        if is_masked:
+            personas = [PERSONA_SYS_PROMPT.format(persona="impartial observer")]
+            warn = ""
+        elif args.disable_cross_encoder:
             groups = get_groups(args, all_results[i])
             personas = [PERSONA_SYS_PROMPT.format(persona=g) for g in groups]
+            personas.insert(0, PERSONA_SYS_PROMPT.format(persona="neutral general public"))
             warn = DEBIAS_PROMPT
         else:
             bias_labels = routes[i][1]
@@ -483,9 +547,8 @@ def adaptive_path_inference(args, models, indices, method_name, all_results, rou
             personas = [PERSONA_SYS_PROMPT.format(persona=p) for p in persona_descs]
             bias_types = ", ".join(bias_labels)
             warn = BIAS_WARNING.format(bias_types=bias_types) + DEBIAS_PROMPT
+            personas.insert(0, PERSONA_SYS_PROMPT.format(persona="neutral general public"))
 
-        # Always prepend neutral general persona
-        personas.insert(0, PERSONA_SYS_PROMPT.format(persona="neutral general public"))
         per_sample_personas.append(personas)
         per_sample_warnings.append(warn)
 
@@ -506,8 +569,10 @@ def adaptive_path_inference(args, models, indices, method_name, all_results, rou
                     continue
                 i = indices[j]
                 is_init = (round == 0)
-                prompt = get_prompt(args, all_results[i], method,
-                                    is_init=is_init, warnings=per_sample_warnings[j] if is_init else "")
+                item = mask_entities(all_results[i]) if is_masked else all_results[i]
+                prompt = get_prompt(args, item, method,
+                                    is_init=is_init, warnings=per_sample_warnings[j] if is_init else "",
+                                    logical=is_init, masked=is_masked)
 
                 if len(debate_history[j][round]) == 0:
                     debate_history[j][round].append(prompt)
@@ -539,7 +604,8 @@ def adaptive_path_inference(args, models, indices, method_name, all_results, rou
     final_prompts = []
     for j in range(N):
         i = indices[j]
-        prompt = get_prompt(args, all_results[i], method, is_init=False)
+        item = mask_entities(all_results[i]) if is_masked else all_results[i]
+        prompt = get_prompt(args, item, method, is_init=False, is_summary=True, masked=is_masked)
         final_prompts.append(format_prompt(
             args, prompt,
             sys_prompt=DEFAULT_SYS_PROMPT,
@@ -779,6 +845,12 @@ def parse_arguments():
     parser.add_argument(
         "--disable_cross_encoder", action="store_true",
         help="Disable Cross-Encoder routing, use legacy get_groups() for all samples"
+    )
+
+    parser.add_argument(
+        "--mask_entities", type=str, default="none",
+        choices=["none", "fast_path", "both"],
+        help="Entity masking mode: none (disabled), fast_path (option 1: Fast Path only), or both (option 2: both paths)"
     )
 
     args = parser.parse_args()
