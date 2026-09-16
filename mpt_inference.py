@@ -454,7 +454,6 @@ def fast_path_inference(args, models, indices, method_name, all_results):
                 if resp2:
                     responses[j] = resp2[0]
 
-    # ── Write results (same format as MPT) ──
     for j, i in enumerate(indices):
         pred = get_pred(responses[j])
         if method_name in all_results[i] and not args.overwrite:
@@ -747,7 +746,7 @@ def parse_arguments():
 
     # ── Cross-Encoder Routing Args ──
     parser.add_argument(
-        "--cross_encoder_model", type=str, default="MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+        "--cross_encoder_model", type=str, default="cross-encoder/nli-distilroberta-base",
         help="HuggingFace model for Cross-Encoder NLI scoring"
     )
 
