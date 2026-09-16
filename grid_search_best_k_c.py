@@ -326,7 +326,7 @@ def parse_arguments():
     parser.add_argument(
         "--model_name",
         type=str,
-        default="cross-encoder/nli-distilroberta-base",
+        default="MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
         help="Cross-Encoder model name",
     )
     parser.add_argument(

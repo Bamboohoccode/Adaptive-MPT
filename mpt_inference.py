@@ -747,7 +747,7 @@ def parse_arguments():
 
     # ── Cross-Encoder Routing Args ──
     parser.add_argument(
-        "--cross_encoder_model", type=str, default="cross-encoder/nli-distilroberta-base",
+        "--cross_encoder_model", type=str, default="MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
         help="HuggingFace model for Cross-Encoder NLI scoring"
     )
 
