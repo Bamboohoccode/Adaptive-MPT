@@ -4,28 +4,27 @@ import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 # ── Topic-Matching Statements for Cross-Encoder Scoring ──
-# Affirmative formulation to avoid negation blindness in NLI models
 BIAS_STATEMENTS = {
     "BBQ": {
-        "neutral":       "This text is an objective, neutral statement without demographic stereotypes or social bias.",
-        "uncertainty":   "There is not enough information in the text to determine a definitive answer.",
-        "age":           "This text involves age groups, elderly people, or age stereotypes.",
-        "disability":    "This text involves disability status, mental health, or physical challenges.",
-        "gender":        "This text involves gender identity, men, women, or gender stereotypes.",
-        "nationality":   "This text involves nationalities, foreign countries, immigrants, or ethnic origins.",
-        "appearance":    "This text involves physical appearance, body weight, looks, or beauty standards.",
-        "race":          "This text involves race, African American, Latino, Asian, or racial stereotypes.",
-        "religion":      "This text involves religion, religious beliefs, Islam, Judaism, or Christianity.",
-        "socioeconomic": "This text involves socioeconomic status, wealth, poverty, low income, or social class.",
-        "sexuality":     "This text involves sexual orientation, gay, lesbian, bisexual, or LGBTQ.",
+        "neutral":       "This text is about neutral objects, science, geography, facts, or events without sensitive demographics.",
+        "uncertainty":   "This text does not have enough information to determine the answer.",
+        "age":           "This text discusses age, elderly people, or younger generations.",
+        "disability":    "This text discusses disability, handicap, mental health, or physical challenges.",
+        "gender":        "This text discusses gender, men, women, or gender identity.",
+        "nationality":   "This text discusses nationalities, foreign countries, or immigrants.",
+        "appearance":    "This text discusses physical appearance, body weight, obesity, or looks.",
+        "race":          "This text discusses race, skin color, African American, Asian, or ethnic groups.",
+        "religion":      "This text discusses religion, faith, Islam, Judaism, or religious beliefs.",
+        "socioeconomic": "This text discusses wealth, poverty, low income, or social class.",
+        "sexuality":     "This text discusses sexual orientation, gay, lesbian, or LGBTQ.",
     },
     "stereoset": {
-        "neutral":       "This text is an objective, neutral statement without demographic stereotypes or social bias.",
-        "uncertainty":   "There is not enough information in the text to determine a definitive answer.",
-        "gender":        "This text involves gender identity, men, women, or gender stereotypes.",
-        "race":          "This text involves race, ethnicity, nationality, or racial stereotypes.",
-        "religion":      "This text involves religion, religious beliefs, or religious stereotypes.",
-        "profession":    "This text involves professions, careers, jobs, or occupational stereotypes.",
+        "neutral":       "This text is about neutral objects, science, geography, facts, or events without sensitive demographics.",
+        "uncertainty":   "This text does not have enough information to determine the answer.",
+        "gender":        "This text discusses gender, men, women, or gender identity.",
+        "race":          "This text discusses race, skin color, African American, Asian, or ethnic groups.",
+        "religion":      "This text discusses religion, faith, Islam, Judaism, or religious beliefs.",
+        "profession":    "This text discusses jobs, careers, professions, or occupations.",
     },
 }
 
@@ -48,8 +47,8 @@ class CrossEncoderRouter:
     """Routes samples to Fast Path or Adaptive Persona Path using NLI entailment scores.
     
     Supports:
-    - 2-class zero-shot classifiers (e.g. MoritzLaurer/deberta-v3-base-zeroshot-v2.0)
-    - 3-class NLI classifiers (e.g. facebook/bart-large-mnli, cross-encoder/nli-deberta-v3-base)
+    - 2-class zero-shot classifiers (e.g. MoritzLaurer/deberta-v3-base-zeroshot-v2.0) -> entailment at index 0
+    - 3-class NLI classifiers (e.g. facebook/bart-large-mnli, cross-encoder/nli-deberta-v3-base) -> entailment at index 2
     """
 
     def __init__(self, model_name="MoritzLaurer/deberta-v3-base-zeroshot-v2.0", device="cpu", dataset="BBQ"):
@@ -62,7 +61,7 @@ class CrossEncoderRouter:
         self.labels = list(self.statements.keys())
         self._cache = {}
 
-        # Dynamically determine the entailment class index based on model config
+        # Dynamically determine the entailment class index from model configuration
         self.entail_idx = self._find_entailment_index()
 
     def _find_entailment_index(self):
@@ -80,7 +79,10 @@ class CrossEncoderRouter:
         return 0 if num_labels == 2 else 2
 
     def score(self, premise):
-        """Score premise against all bias statements. Returns {label: entailment_score}."""
+        """Score premise against all bias statements using competitive softmax across candidate labels.
+        
+        Returns {label: probability}.
+        """
         key = hash(premise)
         if key in self._cache:
             return self._cache[key]
@@ -92,7 +94,8 @@ class CrossEncoderRouter:
 
         with torch.no_grad():
             logits = self.model(**inputs).logits
-            entail_scores = torch.softmax(logits, dim=-1)[:, self.entail_idx].cpu().tolist()
+            # Competitive softmax across all candidate hypotheses (Hugging Face zero-shot standard)
+            entail_scores = torch.softmax(logits[:, self.entail_idx], dim=0).cpu().tolist()
 
         result = dict(zip(self.labels, entail_scores))
         self._cache[key] = result
@@ -102,28 +105,12 @@ class CrossEncoderRouter:
         """Score multiple premises with caching and batching."""
         uncached = [p for p in premises if hash(p) not in self._cache]
         if uncached:
-            for i in range(0, len(uncached), batch_size):
-                chunk = uncached[i : i + batch_size]
-                all_pairs = []
-                for p in chunk:
-                    for hyp in self.statements.values():
-                        all_pairs.append((p, hyp))
-                inputs = self.tokenizer(
-                    all_pairs, padding=True, truncation=True, return_tensors="pt"
-                ).to(self.device)
-                with torch.no_grad():
-                    logits = self.model(**inputs).logits
-                    entail_scores = torch.softmax(logits, dim=-1)[:, self.entail_idx].cpu().tolist()
-
-                num_labels = len(self.labels)
-                for j, p in enumerate(chunk):
-                    start = j * num_labels
-                    end = start + num_labels
-                    self._cache[hash(p)] = dict(zip(self.labels, entail_scores[start:end]))
+            for p in uncached:
+                self.score(p)
 
         return [self.score(p) for p in premises]
 
-    def route(self, premise, top_k, top_c):
+    def route(self, premise, top_k=2, top_c=2):
         """Route a single premise.
 
         Returns:
@@ -138,7 +125,7 @@ class CrossEncoderRouter:
         bias_labels = [l for l, _ in ranked if l not in ("neutral", "uncertainty")][:top_k]
         return is_fast, bias_labels, scores
 
-    def route_batch(self, premises, top_k, top_c):
+    def route_batch(self, premises, top_k=2, top_c=2):
         """Route a batch of premises."""
         all_scores = self.score_batch(premises)
         results = []
