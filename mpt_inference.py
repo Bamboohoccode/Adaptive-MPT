@@ -9,7 +9,7 @@ from openai import OpenAI
 import re
 from tqdm import tqdm
 from xopen import xopen
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
@@ -40,6 +40,8 @@ class Decoder():
         self.max_tokens = args.max_tokens
         self.is_chat_templates = args.chat_templates
         self.args = args
+        self.call_count = 0
+        self.total_prompts_decoded = 0
 
         if self.is_chat_templates:
             self.tokenizer = AutoTokenizer.from_pretrained(
@@ -71,6 +73,10 @@ class Decoder():
             )
     
     def decode(self, prompt):
+        self.call_count += 1
+        num_prompts = len(prompt) if isinstance(prompt, list) else 1
+        self.total_prompts_decoded += num_prompts
+
         if self.inference_type == "vllm":
             if self.is_chat_templates:
                 prompt = self.tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
@@ -427,10 +433,18 @@ def get_pred(resp):
     except Exception:
         return -1
 
-def decode_batch(models, args, formatted_prompts):
-    """Unified decode for both vllm and openai backends."""
+
+TOTAL_LLM_CALLS = 0
+
+
+def decode_batch(models, args, formatted_prompts, **kwargs):
+    """Unified decode for both vllm and openai backends with call tracking."""
+    global TOTAL_LLM_CALLS
     if not formatted_prompts:
         return []
+
+    TOTAL_LLM_CALLS += len(formatted_prompts)
+
     if args.inference_type == "vllm":
         raw = models[args.summary_id].decode(formatted_prompts)
         return [o.outputs[0].text.strip() for o in raw]
@@ -543,7 +557,7 @@ def fast_path_inference(args, models, indices, method_name, all_results, turn1_c
             prompts.append(format_prompt(args, prompt_text, sys_prompt=DEFAULT_SYS_PROMPT, id=args.summary_id))
 
         log_data(f"\n{'='*30}\nFast Path Turn 1 ({args.fast_path_method}, masked={is_masked}):", args)
-        responses = decode_batch(models, args, prompts)
+        responses = decode_batch(models, args, prompts, phase="fast_path_turn1")
         if responses:
             log_data(f"\n{'-'*30}\nFast Path response sample:\n{responses[0]}", args)
 
@@ -561,7 +575,7 @@ def fast_path_inference(args, models, indices, method_name, all_results, turn1_c
             reprompt_prompts.append(reprompt_prompt)
 
         log_data(f"\n{'='*30}\nFast Path Turn 2 Reprompting ({len(reprompt_prompts)} samples, masked={is_masked}):", args)
-        resp2 = decode_batch(models, args, reprompt_prompts)
+        resp2 = decode_batch(models, args, reprompt_prompts, phase="fast_path_turn2")
         for j in range(len(indices)):
             if j < len(resp2) and resp2[j]:
                 responses[j] = resp2[j]
@@ -661,7 +675,7 @@ def adaptive_path_inference(args, models, indices, method_name, all_results, rou
 
             if formatted_prompts:
                 log_data(f"\n{'='*30}\nAdaptive Path, Round {round}, Agent {agent_id}:", args)
-                responses = decode_batch(models, args, formatted_prompts)
+                responses = decode_batch(models, args, formatted_prompts, phase=f"adaptive_debate_r{round}_a{agent_id}")
                 if responses:
                     log_data(f"\n{'-'*30}\nResponse sample:\n{responses[0]}", args)
 
@@ -688,7 +702,7 @@ def adaptive_path_inference(args, models, indices, method_name, all_results, rou
         ))
 
     log_data(f"\n{'='*30}\nAdaptive Path, Final summary:", args)
-    final_responses = decode_batch(models, args, final_prompts)
+    final_responses = decode_batch(models, args, final_prompts, phase="adaptive_summary")
     if final_responses:
         log_data(f"\n{'-'*30}\nFinal response sample:\n{final_responses[0]}", args)
 
@@ -739,7 +753,7 @@ def batch_inference(args, models, method_name):
                 turn1_prompts_text.append(prompt_text)
                 turn1_prompts.append(format_prompt(args, prompt_text, sys_prompt=DEFAULT_SYS_PROMPT, id=args.summary_id))
 
-            turn1_responses = decode_batch(models, args, turn1_prompts)
+            turn1_responses = decode_batch(models, args, turn1_prompts, phase="routing")
             turn1_cache = {}
             fast_indices = []
             adapt_indices = []
@@ -824,6 +838,10 @@ def main():
 
     models = [Decoder(args, model) for model in args.models]
     batch_inference(args, models, method_name)
+
+    print(f"\nTotal LLM calls: {TOTAL_LLM_CALLS}\n")
+    if hasattr(args, "log_path") and args.log_path:
+        log_data(f"Total LLM calls: {TOTAL_LLM_CALLS}", args)
 
     # Save CE cache after inference
     if not args.disable_cross_encoder and args.ce_cache_file:
