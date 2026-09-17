@@ -388,6 +388,26 @@ def parse_arguments():
         help="Optional path to save JSON metrics"
     )
     parser.add_argument(
+        "--num_gpus", type=int, default=1,
+        help="Number of GPUs to use for tensor parallelism in vLLM"
+    )
+    parser.add_argument(
+        "--gpu_memory_utilization", type=float, default=0.85,
+        help="GPU memory utilization ratio for vLLM"
+    )
+    parser.add_argument(
+        "--max_model_len", type=int, default=32768,
+        help="Maximum model context length for vLLM"
+    )
+    parser.add_argument(
+        "--models_dir", type=str, default=None,
+        help="Directory where models are downloaded/cached"
+    )
+    parser.add_argument(
+        "--log_path", type=str, default=None,
+        help="Directory to save logs"
+    )
+    parser.add_argument(
         "--mock", action="store_true",
         help="Run mock evaluation without loading actual LLM (useful for quick pipeline verification)"
     )

@@ -48,12 +48,15 @@ class Decoder():
                 )
 
         if self.inference_type == "vllm":
+            num_gpus = getattr(args, "num_gpus", 1)
+            gpu_mem = getattr(args, "gpu_memory_utilization", 0.85)
+            max_len = getattr(args, "max_model_len", 32768)
             self.model = LLM(
                 model=self.model_name,
-                tensor_parallel_size=args.num_gpus,
-                gpu_memory_utilization=0.85,
+                tensor_parallel_size=num_gpus,
+                gpu_memory_utilization=gpu_mem,
                 # download_dir=args.models_dir,
-                max_model_len=32768,
+                max_model_len=max_len,
             )
             self.sampling_params = SamplingParams(
                 temperature=self.temperature,
@@ -72,7 +75,8 @@ class Decoder():
             if self.is_chat_templates:
                 prompt = self.tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
 
-            log_data(f"{prompt[0]}", self.args)
+            if hasattr(self.args, "log_path") and self.args.log_path:
+                log_data(f"{prompt[0]}", self.args)
 
             outputs = self.model.generate(
                 prompt,
@@ -161,10 +165,16 @@ def log_start(METHOD, args):
     args.log_path = log_path
 
 def log_data(text, args):
-    with open(args.log_path + '/loggings.txt', 'a', encoding='utf-8') as f:
-        f.write(str(text))
-        # print(text)
-        f.write('\n')
+    log_path = getattr(args, "log_path", None)
+    if not log_path:
+        return
+    try:
+        os.makedirs(log_path, exist_ok=True)
+        with open(log_path + '/loggings.txt', 'a', encoding='utf-8') as f:
+            f.write(str(text))
+            f.write('\n')
+    except Exception:
+        pass
 
 def get_groups(args, line):
     """Legacy heuristic group extraction. Only used when --disable_cross_encoder is set."""
@@ -235,6 +245,41 @@ def mask_entities(item):
         masked_item[k_b] = f"[Person B] ({masked_item[k_b]})"
         
     return masked_item
+
+def get_undetermined_index(item):
+    """Extract the index (0, 1, or 2) corresponding to the undetermined option."""
+    ainfo = item.get("answer_info", {})
+    for k, v in ainfo.items():
+        if len(v) > 1 and str(v[1]).lower() == "unknown":
+            return int(k.replace("ans", ""))
+    for idx in [0, 1, 2]:
+        text = str(item.get(f"ans{idx}", "")).lower()
+        if any(kw in text for kw in [
+            "cannot be determined", "can't be determined",
+            "undetermined", "unknown", "not enough information",
+            "not answerable", "not determinable"
+        ]):
+            return idx
+    return 2
+
+def is_classified_as_ambiguous(pred, item):
+    """Check whether the prediction indicates insufficient context (Ambiguous -> Fast Path).
+    Correctly handles permuted BBQ option positions (where undetermined can be 0, 1, or 2).
+    """
+    if pred is None or pred == -1:
+        return True
+
+    u_idx = get_undetermined_index(item)
+    if pred == u_idx:
+        return True
+
+    ans_text = str(item.get(f"ans{pred}", "")).lower()
+    undetermined_keywords = [
+        "cannot be determined", "can't be determined",
+        "undetermined", "not enough information",
+        "unknown", "not determinable", "not answerable"
+    ]
+    return any(kw in ans_text for kw in undetermined_keywords)
 
 def get_prompt(args, input_example, method, is_init=True, warnings="", logical=False, is_summary=False, masked=False):
     dataset = args.dataset
@@ -467,29 +512,40 @@ def write_results(all_results, task_info):
         print(f"Results for {category} saved to {output_file}")
         current_idx += count
 
-def fast_path_inference(args, models, indices, method_name, all_results):
-    """Fast Path: single-turn inference with UNCERTAINTY_WARNING + DEBIAS_PROMPT.
+def fast_path_inference(args, models, indices, method_name, all_results, turn1_cache=None):
+    """Fast Path: inference on ambiguous / insufficient-context questions.
     
     Supports 3 strategies: direct, logical, logical_reprompting.
+    When router_method == 'context_sufficiency', entities are kept masked.
+    Turn 1 results can be passed in turn1_cache to avoid duplicate decoding.
+    Double-check reprompting allows the model to confirm or correct its answer.
     """
     method = args.method
     is_logical = args.fast_path_method in ("logical", "logical_reprompting")
-    is_masked = getattr(args, "mask_entities", "none") in ("fast_path", "both")
+    router_method = getattr(args, "router_method", "context_sufficiency")
+    if router_method == "context_sufficiency":
+        is_masked = True
+    else:
+        is_masked = getattr(args, "mask_entities", "none") in ("fast_path", "both")
     warnings = "" if is_masked else (UNCERTAINTY_WARNING + DEBIAS_PROMPT)
 
     # ── Turn 1 ──
-    prompts = []
-    prompts_text = []  # raw text for reprompting history
-    for i in indices:
-        item = mask_entities(all_results[i]) if is_masked else all_results[i]
-        prompt_text = get_prompt(args, item, method, warnings=warnings, logical=is_logical, masked=is_masked)
-        prompts_text.append(prompt_text)
-        prompts.append(format_prompt(args, prompt_text, sys_prompt=DEFAULT_SYS_PROMPT, id=args.summary_id))
+    if turn1_cache is not None and all(i in turn1_cache for i in indices):
+        prompts_text = [turn1_cache[i][0] for i in indices]
+        responses = [turn1_cache[i][1] for i in indices]
+    else:
+        prompts = []
+        prompts_text = []  # raw text for reprompting history
+        for i in indices:
+            item = mask_entities(all_results[i]) if is_masked else all_results[i]
+            prompt_text = get_prompt(args, item, method, warnings=warnings, logical=is_logical, masked=is_masked)
+            prompts_text.append(prompt_text)
+            prompts.append(format_prompt(args, prompt_text, sys_prompt=DEFAULT_SYS_PROMPT, id=args.summary_id))
 
-    log_data(f"\n{'='*30}\nFast Path Turn 1 ({args.fast_path_method}, masked={is_masked}):", args)
-    responses = decode_batch(models, args, prompts)
-    if responses:
-        log_data(f"\n{'-'*30}\nFast Path response sample:\n{responses[0]}", args)
+        log_data(f"\n{'='*30}\nFast Path Turn 1 ({args.fast_path_method}, masked={is_masked}):", args)
+        responses = decode_batch(models, args, prompts)
+        if responses:
+            log_data(f"\n{'-'*30}\nFast Path response sample:\n{responses[0]}", args)
 
     # ── Turn 2: Reprompting (logical_reprompting only) ──
     if args.fast_path_method == "logical_reprompting":
@@ -514,6 +570,12 @@ def fast_path_inference(args, models, indices, method_name, all_results):
 
     for j, i in enumerate(indices):
         pred = get_pred(responses[j])
+        if pred == -1:
+            if turn1_cache and i in turn1_cache:
+                pred = get_pred(turn1_cache[i][1])
+            if pred == -1:
+                pred = get_undetermined_index(all_results[i])
+
         if method_name in all_results[i] and not args.overwrite:
             all_results[i][method_name][0].append(pred)
             all_results[i][method_name][1].append([])
@@ -527,7 +589,11 @@ def adaptive_path_inference(args, models, indices, method_name, all_results, rou
     inference_type = args.inference_type
     N = len(indices)
 
-    is_masked = getattr(args, "mask_entities", "none") == "both"
+    router_method = getattr(args, "router_method", "context_sufficiency")
+    if router_method == "context_sufficiency":
+        is_masked = False  # Always unmask in Adaptive Path
+    else:
+        is_masked = getattr(args, "mask_entities", "none") == "both"
 
     # ── Build per-sample personas and warnings ──
     per_sample_personas = []
@@ -536,13 +602,21 @@ def adaptive_path_inference(args, models, indices, method_name, all_results, rou
         if is_masked:
             personas = [PERSONA_SYS_PROMPT.format(persona="impartial observer")]
             warn = ""
-        elif args.disable_cross_encoder:
+        elif args.disable_cross_encoder or routes is None:
             groups = get_groups(args, all_results[i])
             personas = [PERSONA_SYS_PROMPT.format(persona=g) for g in groups]
             personas.insert(0, PERSONA_SYS_PROMPT.format(persona="neutral general public"))
             warn = DEBIAS_PROMPT
         else:
-            bias_labels = routes[i][1]
+            if isinstance(routes, dict):
+                bias_labels = routes[i][1] if i in routes else []
+            elif len(routes) == N:
+                bias_labels = routes[idx_pos][1]
+            elif len(routes) > i:
+                bias_labels = routes[i][1]
+            else:
+                bias_labels = []
+
             persona_descs = get_personas_from_labels(bias_labels)
             personas = [PERSONA_SYS_PROMPT.format(persona=p) for p in persona_descs]
             bias_types = ", ".join(bias_labels)
@@ -632,6 +706,7 @@ def adaptive_path_inference(args, models, indices, method_name, all_results, rou
 def batch_inference(args, models, method_name):
     method = args.method
     dataset = args.dataset
+    router_method = getattr(args, "router_method", "context_sufficiency")
 
     if args.split: 
         path_groups = [[path] for path in args.input_paths]
@@ -647,38 +722,87 @@ def batch_inference(args, models, method_name):
         for category, count, _ in task_info:
             print(f"Task: {category}, Batch samples: {count}")
 
-        # ── Phase 1: Cross-Encoder Routing ──
-        if not args.disable_cross_encoder:
-            router = args._router
-            premises = [f"{line['context']} {line['question']}" for line in all_results]
-            routes = router.route_batch(premises, args.top_k, args.top_c)
-            fast_indices = [i for i, (is_fast, _, _) in enumerate(routes) if is_fast]
-            adapt_indices = [i for i, (is_fast, _, _) in enumerate(routes) if not is_fast]
+        turn1_cache = None
+        routes = None
 
-            # Store routing info for logging
-            for i, (_, labels, scores) in enumerate(routes):
-                all_results[i]["_ce_scores"] = scores
-                all_results[i]["_ce_labels"] = labels
+        if router_method == "context_sufficiency":
+            # ── Phase 1: Pure LLM Context Sufficiency Reasoning on Masked Context ──
+            print(f"\n--- Phase 1: Context Sufficiency Routing (Masked Turn 1) ---")
+            log_data(f"\n--- Phase 1: Context Sufficiency Routing (Masked Turn 1) ---", args)
 
-            print(f"\nRouting: {len(fast_indices)} → Fast Path, {len(adapt_indices)} → Adaptive Path")
-            log_data(f"Routing: {len(fast_indices)} Fast Path, {len(adapt_indices)} Adaptive Path", args)
-        else:
-            routes = None
+            masked_items = [mask_entities(it) for it in all_results]
+            turn1_prompts = []
+            turn1_prompts_text = []
+
+            for it in masked_items:
+                prompt_text = get_prompt(args, it, method, warnings="", logical=True, masked=True)
+                turn1_prompts_text.append(prompt_text)
+                turn1_prompts.append(format_prompt(args, prompt_text, sys_prompt=DEFAULT_SYS_PROMPT, id=args.summary_id))
+
+            turn1_responses = decode_batch(models, args, turn1_prompts)
+            turn1_cache = {}
             fast_indices = []
-            adapt_indices = list(range(total_N))
-            print(f"\nCross-Encoder disabled, all {total_N} samples → Adaptive Path (legacy)")
+            adapt_indices = []
 
-        # ── Phase 2: Fast Path ──
+            for i in range(total_N):
+                resp = turn1_responses[i] if i < len(turn1_responses) else ""
+                turn1_cache[i] = (turn1_prompts_text[i], resp)
+                pred = get_pred(resp)
+
+                if is_classified_as_ambiguous(pred, all_results[i]):
+                    fast_indices.append(i)
+                else:
+                    adapt_indices.append(i)
+
+            print(f"\nRouting: {len(fast_indices)} → Fast Path (Insufficient Context, Masked), {len(adapt_indices)} → Adaptive Path (Sufficient Context, Unmasked)")
+            log_data(f"Routing: {len(fast_indices)} Fast Path, {len(adapt_indices)} Adaptive Path", args)
+
+            # ── Phase 2: Run Cross-Encoder ONCE only on Adaptive Path samples to extract bias types ──
+            if adapt_indices and not args.disable_cross_encoder and hasattr(args, "_router") and args._router is not None:
+                print(f"Running Cross-Encoder once on {len(adapt_indices)} Adaptive Path samples to extract bias personas & warnings...")
+                router = args._router
+                adapt_premises = [f"{all_results[i]['context']} {all_results[i]['question']}" for i in adapt_indices]
+                adapt_routes = router.route_batch(adapt_premises, args.top_k, args.top_c)
+                routes = {}
+                for pos, i in enumerate(adapt_indices):
+                    _, labels, scores = adapt_routes[pos]
+                    routes[i] = (False, labels, scores)
+                    all_results[i]["_ce_scores"] = scores
+                    all_results[i]["_ce_labels"] = labels
+            else:
+                routes = None
+
+        elif router_method == "cross_encoder":
+            # Legacy Cross-Encoder Upfront Routing
+            if not args.disable_cross_encoder and hasattr(args, "_router") and args._router is not None:
+                router = args._router
+                premises = [f"{line['context']} {line['question']}" for line in all_results]
+                raw_routes = router.route_batch(premises, args.top_k, args.top_c)
+                fast_indices = [i for i, (is_fast, _, _) in enumerate(raw_routes) if is_fast]
+                adapt_indices = [i for i, (is_fast, _, _) in enumerate(raw_routes) if not is_fast]
+                routes = {i: raw_routes[i] for i in range(total_N)}
+                for i in range(total_N):
+                    all_results[i]["_ce_scores"] = raw_routes[i][2]
+                    all_results[i]["_ce_labels"] = raw_routes[i][1]
+                print(f"\nRouting (Cross-Encoder): {len(fast_indices)} → Fast Path, {len(adapt_indices)} → Adaptive Path")
+                log_data(f"Routing: {len(fast_indices)} Fast Path, {len(adapt_indices)} Adaptive Path", args)
+            else:
+                routes = None
+                fast_indices = []
+                adapt_indices = list(range(total_N))
+                print(f"\nCross-Encoder disabled, all {total_N} samples → Adaptive Path (legacy)")
+
+        # ── Phase 3: Fast Path ──
         if fast_indices:
-            print(f"\n--- Fast Path ({args.fast_path_method}) ---")
-            fast_path_inference(args, models, fast_indices, method_name, all_results)
+            print(f"\n--- Fast Path ({args.fast_path_method}, {len(fast_indices)} samples) ---")
+            fast_path_inference(args, models, fast_indices, method_name, all_results, turn1_cache=turn1_cache)
 
-        # ── Phase 3: Adaptive Persona Path ──
+        # ── Phase 4: Adaptive Persona Path ──
         if adapt_indices:
-            print(f"\n--- Adaptive Persona Path (top-{args.top_k} personas) ---")
+            print(f"\n--- Adaptive Persona Path ({len(adapt_indices)} samples) ---")
             adaptive_path_inference(args, models, adapt_indices, method_name, all_results, routes)
 
-        # ── Phase 4: Write output ──
+        # ── Phase 5: Write output ──
         write_results(all_results, task_info)
 
 def main():
@@ -786,6 +910,16 @@ def parse_arguments():
     )
 
     parser.add_argument(
+        "--gpu_memory_utilization", type=float, default=0.85,
+        help="GPU memory utilization ratio for vLLM"
+    )
+
+    parser.add_argument(
+        "--max_model_len", type=int, default=32768,
+        help="Maximum model context length for vLLM"
+    )
+
+    parser.add_argument(
         "--overwrite", action="store_true",
         help="Whether overwrite the results"
     )
@@ -808,6 +942,13 @@ def parse_arguments():
     parser.add_argument(
         "--chat_templates", action="store_true",
         help="Whether use chat templates"
+    )
+
+    # ── Routing Strategy ──
+    parser.add_argument(
+        "--router_method", type=str, default="context_sufficiency",
+        choices=["context_sufficiency", "cross_encoder"],
+        help="Routing strategy: 'context_sufficiency' (masked LLM reasoning) or 'cross_encoder' (NLI logits)"
     )
 
     # ── Cross-Encoder Routing Args ──
