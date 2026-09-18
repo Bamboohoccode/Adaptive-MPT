@@ -27,7 +27,7 @@ from collections import defaultdict
 
 # Add multi-persona-thinking to sys.path
 SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_DIR = Path("/home/ngkhtrinh/CODING/Adaptive-MPT/multi-persona-thinking")
+PROJECT_DIR = SCRIPT_DIR if (SCRIPT_DIR / "prompts.py").exists() else SCRIPT_DIR.parent
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
@@ -378,7 +378,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description="Evaluate Dual-Pass Counterfactual Batch Inference & Fast-Path Reprompting")
     parser.add_argument("--models", type=str, nargs="+", default=["meta-llama/Llama-3.1-8B-Instruct"], help="Model name")
     parser.add_argument("--dataset", type=str, default="BBQ", help="Dataset")
-    parser.add_argument("--data_dir", type=str, default="/home/ngkhtrinh/CODING/Adaptive-MPT/multi-persona-thinking/data", help="Data directory")
+    parser.add_argument("--data_dir", type=str, default=str(PROJECT_DIR / "data"), help="Data directory")
     parser.add_argument("--task", type=str, default=None, help="Specific task or None for all")
     parser.add_argument("--truncate", action="store_true", help="Sample 80 items per task")
     parser.add_argument("--mock", action="store_true", help="Run simulated inference without GPU")
