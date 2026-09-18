@@ -338,6 +338,11 @@ def parse_arguments():
     parser.add_argument("--log_path", type=str, default=None, help="Log path")
     parser.add_argument("--output_json", type=str, default=None, help="Output JSON path")
     parser.add_argument("--show_errors", type=int, default=5, help="Number of discrepant samples to print")
+    parser.add_argument(
+    "--temperature",
+    type=float,
+    default=1.0,  # hoặc giá trị mặc định bạn mong muốn, vd: 0.0 hoặc 0.7
+    help="Sampling temperature")
     return parser.parse_args()
 
 

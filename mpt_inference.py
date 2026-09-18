@@ -25,6 +25,8 @@ from prompts import (
     LOGICAL_PROMPT_MASKED, REPROMPT_MASKED, REVIEW_PROMPT_MASKED, SUMMARY_PROMPT_MASKED,
     LOGICAL_PROMPT_FACT_EXTRACTION, REVIEW_PROMPT_FACT_EXTRACTION,
     SUMMARY_PROMPT_FACT_EXTRACTION, REPROMPT_FACT_EXTRACTION,
+    LOGICAL_PROMPT_ASYMMETRIC_UNMASKED,
+    FACT_ANCHOR_SYS_PROMPT, BIAS_AUDITOR_SYS_PROMPT, JUDGE_PERSONA_SYS_PROMPT,
 )
 from cross_encoder import (
     CrossEncoderRouter, LABEL_TO_PERSONA,
@@ -303,13 +305,22 @@ def get_prompt(args, input_example, method, is_init=True, warnings="", logical=F
 
     fact_ext = getattr(args, "feature_extraction", False)
 
+    debate_mode = getattr(args, "debate_mode", "symmetric")
+
     if is_reprompt:
         prompt = REPROMPT_MASKED if masked else (REPROMPT_FACT_EXTRACTION if fact_ext else REPROMPT)
     elif is_init:
         # When entity-masked, 100% decouple from bias: omit all bias/uncertainty warnings
         prompt = ask_prompt if masked else (ask_prompt + warnings)
         if logical or masked:
-            prompt += LOGICAL_PROMPT_MASKED if masked else (LOGICAL_PROMPT_FACT_EXTRACTION if fact_ext else LOGICAL_PROMPT)
+            if masked:
+                prompt += LOGICAL_PROMPT_MASKED
+            elif debate_mode == "asymmetric_tribunal":
+                prompt += LOGICAL_PROMPT_ASYMMETRIC_UNMASKED
+            elif fact_ext:
+                prompt += LOGICAL_PROMPT_FACT_EXTRACTION
+            else:
+                prompt += LOGICAL_PROMPT
     elif is_summary:
         prompt = SUMMARY_PROMPT_MASKED if masked else (SUMMARY_PROMPT_FACT_EXTRACTION if fact_ext else SUMMARY_PROMPT)
     else:
@@ -535,13 +546,12 @@ def write_results(all_results, task_info):
 def fast_path_inference(args, models, indices, method_name, all_results, turn1_cache=None):
     """Fast Path: inference on ambiguous / insufficient-context questions.
     
-    Supports 3 strategies: direct, logical, logical_reprompting.
+    Always applies logical prompt in Turn 1 and double-check logical reprompting in Turn 2.
     When router_method == 'context_sufficiency', entities are kept masked.
     Turn 1 results can be passed in turn1_cache to avoid duplicate decoding.
     Double-check reprompting allows the model to confirm or correct its answer.
     """
     method = args.method
-    is_logical = args.fast_path_method in ("logical", "logical_reprompting")
     router_method = getattr(args, "router_method", "context_sufficiency")
     if router_method == "context_sufficiency":
         is_masked = True
@@ -549,7 +559,7 @@ def fast_path_inference(args, models, indices, method_name, all_results, turn1_c
         is_masked = getattr(args, "mask_entities", "none") in ("fast_path", "both")
     warnings = "" if is_masked else (UNCERTAINTY_WARNING + DEBIAS_PROMPT)
 
-    # ── Turn 1 ──
+    # ── Turn 1 (Always logical) ──
     if turn1_cache is not None and all(i in turn1_cache for i in indices):
         prompts_text = [turn1_cache[i][0] for i in indices]
         responses = [turn1_cache[i][1] for i in indices]
@@ -558,36 +568,35 @@ def fast_path_inference(args, models, indices, method_name, all_results, turn1_c
         prompts_text = []  # raw text for reprompting history
         for i in indices:
             item = mask_entities(all_results[i]) if is_masked else all_results[i]
-            prompt_text = get_prompt(args, item, method, warnings=warnings, logical=is_logical, masked=is_masked)
+            prompt_text = get_prompt(args, item, method, warnings=warnings, logical=True, masked=is_masked)
             prompts_text.append(prompt_text)
             prompts.append(format_prompt(args, prompt_text, sys_prompt=DEFAULT_SYS_PROMPT, id=args.summary_id))
 
-        log_data(f"\n{'='*30}\nFast Path Turn 1 ({args.fast_path_method}, masked={is_masked}):", args)
+        log_data(f"\n{'='*30}\nFast Path Turn 1 (logical, masked={is_masked}):", args)
         responses = decode_batch(models, args, prompts, phase="fast_path_turn1")
         if responses:
             log_data(f"\n{'-'*30}\nFast Path response sample:\n{responses[0]}", args)
 
-    # ── Turn 2: Reprompting (logical_reprompting only) ──
-    if args.fast_path_method == "logical_reprompting":
-        reprompt_prompts = []
-        fact_ext = getattr(args, "feature_extraction", False)
-        reprompt_text = REPROMPT_MASKED if is_masked else (REPROMPT_FACT_EXTRACTION if fact_ext else REPROMPT)
-        for j, i in enumerate(indices):
-            reprompt_prompt = format_prompt(
-                args, reprompt_text + POSTFIX_PROMPT,
-                sys_prompt=DEFAULT_SYS_PROMPT,
-                thinking_history=[[prompts_text[j], responses[j]]],
-                id=args.summary_id,
-            )
-            reprompt_prompts.append(reprompt_prompt)
+    # ── Turn 2: Always apply logical reprompting (Double-check) ──
+    reprompt_prompts = []
+    fact_ext = getattr(args, "feature_extraction", False)
+    reprompt_text = REPROMPT_MASKED if is_masked else (REPROMPT_FACT_EXTRACTION if fact_ext else REPROMPT)
+    for j, i in enumerate(indices):
+        reprompt_prompt = format_prompt(
+            args, reprompt_text + POSTFIX_PROMPT,
+            sys_prompt=DEFAULT_SYS_PROMPT,
+            thinking_history=[[prompts_text[j], responses[j]]],
+            id=args.summary_id,
+        )
+        reprompt_prompts.append(reprompt_prompt)
 
-        log_data(f"\n{'='*30}\nFast Path Turn 2 Reprompting ({len(reprompt_prompts)} samples, masked={is_masked}):", args)
-        resp2 = decode_batch(models, args, reprompt_prompts, phase="fast_path_turn2")
-        for j in range(len(indices)):
-            if j < len(resp2) and resp2[j]:
-                responses[j] = resp2[j]
-        if responses:
-            log_data(f"\n{'-'*30}\nFast Path Turn 2 response sample:\n{responses[0]}", args)
+    log_data(f"\n{'='*30}\nFast Path Turn 2 Reprompting ({len(reprompt_prompts)} samples, masked={is_masked}):", args)
+    resp2 = decode_batch(models, args, reprompt_prompts, phase="fast_path_turn2")
+    for j in range(len(indices)):
+        if j < len(resp2) and resp2[j]:
+            responses[j] = resp2[j]
+    if responses:
+        log_data(f"\n{'-'*30}\nFast Path Turn 2 response sample:\n{responses[0]}", args)
 
     for j, i in enumerate(indices):
         pred = get_pred(responses[j])
@@ -605,10 +614,18 @@ def fast_path_inference(args, models, indices, method_name, all_results, turn1_c
             all_results[i][method_name] = [[pred], [[]], [responses[j]]]
 
 def adaptive_path_inference(args, models, indices, method_name, all_results, routes):
-    """Adaptive Persona Path: multi-round debate with top-k personas + BIAS_WARNING + DEBIAS_PROMPT."""
+    """Adaptive Persona Path: multi-round debate with personas.
+    
+    Supports:
+    - 'symmetric': standard MPT multi-round debate with top-k personas.
+    - 'asymmetric_tribunal': 3-Persona Tribunal (Fact-Anchor, Bias-Auditor, Judge Persona).
+      In each round, the 3 personas generate their reasoning.
+      In the final round, the Judge Persona produces the final <answer> </answer> verdict.
+    """
     method = args.method
     inference_type = args.inference_type
     N = len(indices)
+    debate_mode = getattr(args, "debate_mode", "symmetric")
 
     router_method = getattr(args, "router_method", "context_sufficiency")
     if router_method == "context_sufficiency":
@@ -619,33 +636,44 @@ def adaptive_path_inference(args, models, indices, method_name, all_results, rou
     # ── Build per-sample personas and warnings ──
     per_sample_personas = []
     per_sample_warnings = []
-    for idx_pos, i in enumerate(indices):
-        if is_masked:
-            personas = [PERSONA_SYS_PROMPT.format(persona="impartial observer")]
-            warn = ""
-        elif args.disable_cross_encoder or routes is None:
-            groups = get_groups(args, all_results[i])
-            personas = [PERSONA_SYS_PROMPT.format(persona=g) for g in groups]
-            personas.insert(0, PERSONA_SYS_PROMPT.format(persona="neutral general public"))
-            warn = DEBIAS_PROMPT
-        else:
-            if isinstance(routes, dict):
-                bias_labels = routes[i][1] if i in routes else []
-            elif len(routes) == N:
-                bias_labels = routes[idx_pos][1]
-            elif len(routes) > i:
-                bias_labels = routes[i][1]
+
+    if debate_mode == "asymmetric_tribunal":
+        tribunal_personas = [
+            FACT_ANCHOR_SYS_PROMPT,
+            BIAS_AUDITOR_SYS_PROMPT,
+            JUDGE_PERSONA_SYS_PROMPT,
+        ]
+        for _ in range(N):
+            per_sample_personas.append(tribunal_personas)
+            per_sample_warnings.append("")
+    else:
+        for idx_pos, i in enumerate(indices):
+            if is_masked:
+                personas = [PERSONA_SYS_PROMPT.format(persona="impartial observer")]
+                warn = ""
+            elif args.disable_cross_encoder or routes is None:
+                groups = get_groups(args, all_results[i])
+                personas = [PERSONA_SYS_PROMPT.format(persona=g) for g in groups]
+                personas.insert(0, PERSONA_SYS_PROMPT.format(persona="neutral general public"))
+                warn = DEBIAS_PROMPT
             else:
-                bias_labels = []
+                if isinstance(routes, dict):
+                    bias_labels = routes[i][1] if i in routes else []
+                elif len(routes) == N:
+                    bias_labels = routes[idx_pos][1]
+                elif len(routes) > i:
+                    bias_labels = routes[i][1]
+                else:
+                    bias_labels = []
 
-            persona_descs = get_personas_from_labels(bias_labels)
-            personas = [PERSONA_SYS_PROMPT.format(persona=p) for p in persona_descs]
-            bias_types = ", ".join(bias_labels)
-            warn = BIAS_WARNING.format(bias_types=bias_types) + DEBIAS_PROMPT
-            personas.insert(0, PERSONA_SYS_PROMPT.format(persona="neutral general public"))
+                persona_descs = get_personas_from_labels(bias_labels)
+                personas = [PERSONA_SYS_PROMPT.format(persona=p) for p in persona_descs]
+                bias_types = ", ".join(bias_labels)
+                warn = BIAS_WARNING.format(bias_types=bias_types) + DEBIAS_PROMPT
+                personas.insert(0, PERSONA_SYS_PROMPT.format(persona="neutral general public"))
 
-        per_sample_personas.append(personas)
-        per_sample_warnings.append(warn)
+            per_sample_personas.append(personas)
+            per_sample_warnings.append(warn)
 
     max_agents = max(len(p) for p in per_sample_personas)
     pred_history = [[[] for _ in range(args.num_rounds + 1)] for _ in range(N)]
@@ -681,7 +709,7 @@ def adaptive_path_inference(args, models, indices, method_name, all_results, rou
                 valid_map.append(j)
 
             if formatted_prompts:
-                log_data(f"\n{'='*30}\nAdaptive Path, Round {round}, Agent {agent_id}:", args)
+                log_data(f"\n{'='*30}\nAdaptive Path ({debate_mode}), Round {round}, Agent {agent_id}:", args)
                 responses = decode_batch(models, args, formatted_prompts, phase=f"adaptive_debate_r{round}_a{agent_id}")
                 if responses:
                     log_data(f"\n{'-'*30}\nResponse sample:\n{responses[0]}", args)
@@ -695,20 +723,22 @@ def adaptive_path_inference(args, models, indices, method_name, all_results, rou
         for j in range(N):
             debate_history[j][round].extend(round_history[j])
 
-    # ── Final summary inference ──
+    # ── Final summary / verdict inference ──
+    # In the final round, the Judge Persona produces the final <answer> </answer> verdict.
     final_prompts = []
+    final_sys_prompt = JUDGE_PERSONA_SYS_PROMPT if debate_mode == "asymmetric_tribunal" else DEFAULT_SYS_PROMPT
     for j in range(N):
         i = indices[j]
         item = mask_entities(all_results[i]) if is_masked else all_results[i]
         prompt = get_prompt(args, item, method, is_init=False, is_summary=True, masked=is_masked)
         final_prompts.append(format_prompt(
             args, prompt,
-            sys_prompt=DEFAULT_SYS_PROMPT,
+            sys_prompt=final_sys_prompt,
             thinking_history=debate_history[j],
             id=args.summary_id,
         ))
 
-    log_data(f"\n{'='*30}\nAdaptive Path, Final summary:", args)
+    log_data(f"\n{'='*30}\nAdaptive Path ({debate_mode}), Final summary:", args)
     final_responses = decode_batch(models, args, final_prompts, phase="adaptive_summary")
     if final_responses:
         log_data(f"\n{'-'*30}\nFinal response sample:\n{final_responses[0]}", args)
@@ -967,6 +997,13 @@ def parse_arguments():
     parser.add_argument(
         "--chat_templates", action="store_true",
         help="Whether use chat templates"
+    )
+
+    # ── Debate Mode ──
+    parser.add_argument(
+        "--debate_mode", type=str, default="symmetric",
+        choices=["symmetric", "asymmetric_tribunal"],
+        help="Debate mode in Adaptive Path: 'symmetric' (standard MPT personas) or 'asymmetric_tribunal' (Fact-Anchor, Bias-Auditor, Judge)"
     )
 
     # ── Routing Strategy ──
