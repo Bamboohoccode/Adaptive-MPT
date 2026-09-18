@@ -1001,9 +1001,14 @@ def parse_arguments():
 
     # ── Debate Mode ──
     parser.add_argument(
-        "--debate_mode", type=str, default="symmetric",
+        "--debate_mode", type=str, default="asymmetric_tribunal",
         choices=["symmetric", "asymmetric_tribunal"],
-        help="Debate mode in Adaptive Path: 'symmetric' (standard MPT personas) or 'asymmetric_tribunal' (Fact-Anchor, Bias-Auditor, Judge)"
+        help="Debate mode in Adaptive Path: 'asymmetric_tribunal' (Fact-Anchor, Bias-Auditor, Judge) or 'symmetric'"
+    )
+
+    parser.add_argument(
+        "--asymmetric", action="store_true", default=None,
+        help="Enable Asymmetric mode (automatically sets --debate_mode asymmetric_tribunal)"
     )
 
     # ── Routing Strategy ──
@@ -1064,6 +1069,14 @@ def parse_arguments():
     args = parser.parse_args()
 
     args.fact_extraction = args.feature_extraction
+
+    # Synchronize --asymmetric and --debate_mode
+    if args.asymmetric is not None:
+        args.debate_mode = "asymmetric_tribunal" if args.asymmetric else "symmetric"
+    elif args.debate_mode == "asymmetric_tribunal":
+        args.asymmetric = True
+    else:
+        args.asymmetric = False
 
     if args.method.endswith("no_general"):
         args.no_general = True

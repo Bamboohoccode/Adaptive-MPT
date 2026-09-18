@@ -178,39 +178,6 @@ def evaluate_dual_pass(args, models):
             resps_m = all_responses[:N]
             resps_u = all_responses[N:]
 
-        # ── Turn 2: Fast Path Reprompting (Double-Check on Consistent Subset) ──
-        fast_indices = [idx for idx in range(N) if get_pred(resps_m[idx]) == get_pred(resps_u[idx])]
-        resps_fast_t2 = {}
-
-        if fast_indices:
-            reprompt_prompts = []
-            for idx in fast_indices:
-                rp = format_prompt(
-                    args,
-                    REPROMPT + POSTFIX_PROMPT,
-                    sys_prompt=DEFAULT_SYS_PROMPT,
-                    thinking_history=[[raw_u_texts[idx], resps_u[idx]]],
-                    id=args.summary_id,
-                )
-                reprompt_prompts.append(rp)
-
-            if getattr(args, "mock", False):
-                # Reprompting confirms ground truth: ambig -> undetermined, disambig -> gold
-                for idx in fast_indices:
-                    it = data[idx]
-                    cond = it.get("context_condition", "")
-                    lbl = it["label"]
-                    u_idx = get_undetermined_index(it)
-                    if cond == "ambig":
-                        resps_fast_t2[idx] = f"Reprompt verified insufficient context. <answer>{u_idx}</answer>"
-                    else:
-                        resps_fast_t2[idx] = f"Reprompt verified factual evidence. <answer>{lbl}</answer>"
-            else:
-                resp2_list = decode_batch(models, args, reprompt_prompts, phase=f"fast_path_t2_{task_name}")
-                for pos, idx in enumerate(fast_indices):
-                    if pos < len(resp2_list) and resp2_list[pos]:
-                        resps_fast_t2[idx] = resp2_list[pos]
-
         # Metrics accumulator for this task
         m = defaultdict(int)
         m["total"] = N
@@ -237,22 +204,13 @@ def evaluate_dual_pass(args, models):
                 m["u_correct"] += 1
                 m["u_ambig_correct" if is_ambig else "u_disambig_correct"] += 1
 
-            # Consistency & Fast Path Reprompting
+            # Consistency & Fast Path
             is_consistent = (pred_m == pred_u)
             if is_consistent:
                 m["consistent"] += 1
-                pred_t1 = pred_m
-                if pred_t1 == lbl:
-                    m["fp_t1_correct"] += 1
-
-                # Evaluate Turn 2 Reprompting result
-                t2_resp = resps_fast_t2.get(idx)
-                pred_t2 = get_pred(t2_resp) if t2_resp else pred_t1
-                if pred_t2 == -1:
-                    pred_t2 = pred_t1
-                if pred_t2 == lbl:
-                    m["fp_t2_correct"] += 1
-                    m["fp_t2_ambig_correct" if is_ambig else "fp_t2_disambig_correct"] += 1
+                if pred_m == lbl:
+                    m["fast_path_correct"] += 1
+                    m["fp_ambig_correct" if is_ambig else "fp_disambig_correct"] += 1
             else:
                 m["discrepant"] += 1
                 is_bias_shift = is_stereotyped_choice(it, pred_u)
@@ -276,8 +234,7 @@ def evaluate_dual_pass(args, models):
         m["consistency_rate"] = (m["consistent"] / N) * 100 if N else 0
         m["acc_m"] = (m["m_correct"] / N) * 100 if N else 0
         m["acc_u"] = (m["u_correct"] / N) * 100 if N else 0
-        m["acc_fp_t1"] = (m["fp_t1_correct"] / m["consistent"]) * 100 if m["consistent"] else 0
-        m["acc_fp_t2"] = (m["fp_t2_correct"] / m["consistent"]) * 100 if m["consistent"] else 0
+        m["acc_fast_path"] = (m["fast_path_correct"] / m["consistent"]) * 100 if m["consistent"] else 0
         per_task_results[task_name] = m
 
         for k in m:
@@ -287,7 +244,7 @@ def evaluate_dual_pass(args, models):
             f"Task: {task_name:<20} | N: {N:>3} | "
             f"Consistent (FP): {m['consistent']:>3} ({m['consistency_rate']:5.1f}%) | "
             f"Acc(M): {m['acc_m']:5.1f}% | Acc(U): {m['acc_u']:5.1f}% | "
-            f"FP-T1 Acc: {m['acc_fp_t1']:5.1f}% | FP-T2(Reprompt) Acc: {m['acc_fp_t2']:5.1f}%"
+            f"Acc(Fast Path): {m['acc_fast_path']:5.1f}%"
         )
 
     # ── Overall Summary Table ──
@@ -296,44 +253,40 @@ def evaluate_dual_pass(args, models):
     tot_cons_rate = (tot_consistent / T) * 100 if T else 0
     tot_acc_m = (totals["m_correct"] / T) * 100 if T else 0
     tot_acc_u = (totals["u_correct"] / T) * 100 if T else 0
-    tot_acc_fp_t1 = (totals["fp_t1_correct"] / tot_consistent) * 100 if tot_consistent else 0
-    tot_acc_fp_t2 = (totals["fp_t2_correct"] / tot_consistent) * 100 if tot_consistent else 0
+    tot_acc_fp = (totals["fast_path_correct"] / tot_consistent) * 100 if tot_consistent else 0
 
-    print("\n" + "=" * 120)
-    print("SUMMARY RESULTS: DUAL-PASS COUNTERFACTUAL INFERENCE & FAST-PATH REPROMPTING")
-    print("=" * 120)
+    print("\n" + "=" * 110)
+    print("SUMMARY RESULTS: DUAL-PASS COUNTERFACTUAL INFERENCE & FAST-PATH")
+    print("=" * 110)
     print(
         f"{'Task':<22} {'Samples':<8} {'Fast Path (Consistent)':<24} "
-        f"{'Acc(Masked)':<13} {'Acc(Unmasked)':<15} {'FP-T1 Acc':<12} {'FP-T2(Reprompt)'}"
+        f"{'Acc(Masked)':<13} {'Acc(Unmasked)':<15} {'Acc(Fast Path)'}"
     )
-    print("-" * 120)
+    print("-" * 110)
     for task_name, res in per_task_results.items():
         print(
             f"{task_name:<22} {res['total']:<8} "
             f"{res['consistent']:>3} ({res['consistency_rate']:5.1f}%)             "
             f"{res['acc_m']:>5.1f}%        "
             f"{res['acc_u']:>5.1f}%         "
-            f"{res['acc_fp_t1']:>5.1f}%       "
-            f"{res['acc_fp_t2']:>5.1f}%"
+            f"{res['acc_fast_path']:>5.1f}%"
         )
-    print("-" * 120)
+    print("-" * 110)
     print(
         f"{'OVERALL TOTAL':<22} {T:<8} "
         f"{tot_consistent:>3} ({tot_cons_rate:5.1f}%)             "
         f"{tot_acc_m:>5.1f}%        "
         f"{tot_acc_u:>5.1f}%         "
-        f"{tot_acc_fp_t1:>5.1f}%       "
-        f"{tot_acc_fp_t2:>5.1f}%"
+        f"{tot_acc_fp:>5.1f}%"
     )
-    print("=" * 120)
+    print("=" * 110)
 
     # ── Key Highlights ──
     print("\n>>> DUAL-PASS KEY HIGHLIGHTS:")
     print(f"    1. Total Samples Evaluated            : {T}")
     print(f"    2. Fast Path Routed (Consistent)       : {tot_consistent}/{T} ({tot_cons_rate:.2f}% of all questions)")
-    print(f"       -> Fast Path Turn 1 Accuracy       : {tot_acc_fp_t1:.2f}%")
-    print(f"       -> Fast Path Turn 2 Reprompted Acc : {tot_acc_fp_t2:.2f}%")
-    print(f"       -> Potential Compute Saved         : {tot_cons_rate * 0.75:.1f}% (bypassing multi-round debate)")
+    print(f"       -> Fast Path Accuracy              : {tot_acc_fp:.2f}% (Zero extra compute!)")
+    print(f"       -> Potential Compute Saved         : {tot_cons_rate * 0.8:.1f}% (bypassing multi-round debate)")
     print(f"    3. Discrepant Subset (Routed to Debate): {totals['discrepant']}/{T} ({100 - tot_cons_rate:.2f}%)")
     print(f"       -> Demographic Stereotype Shifts   : {totals['stereotype_shifts']} samples")
     print(f"       -> Triggers 3-Persona Tribunal     : Only on genuinely vulnerable questions!")
@@ -364,8 +317,7 @@ def evaluate_dual_pass(args, models):
                     "stereotype_shifts": totals["stereotype_shifts"],
                     "acc_masked": tot_acc_m,
                     "acc_unmasked": tot_acc_u,
-                    "acc_fp_t1": tot_acc_fp_t1,
-                    "acc_fp_t2": tot_acc_fp_t2,
+                    "acc_fast_path": tot_acc_fp,
                     "total_llm_calls": mpt_inference.TOTAL_LLM_CALLS,
                 },
                 "per_task": per_task_results,
@@ -382,7 +334,15 @@ def parse_arguments():
     parser.add_argument("--task", type=str, default=None, help="Specific task or None for all")
     parser.add_argument("--truncate", action="store_true", help="Sample 80 items per task")
     parser.add_argument("--mock", action="store_true", help="Run simulated inference without GPU")
-    parser.add_argument("--asymmetric", action="store_true", help="Enable 3-role Asymmetric CoT for Pass 2 Unmasked")
+    parser.add_argument(
+        "--debate_mode", type=str, default="asymmetric_tribunal",
+        choices=["symmetric", "asymmetric_tribunal"],
+        help="Debate architecture mode: 'asymmetric_tribunal' (enables Asymmetric CoT) or 'symmetric'"
+    )
+    parser.add_argument(
+        "--asymmetric", action="store_true", default=None,
+        help="Enable 3-role Asymmetric mode (automatically True when debate_mode is asymmetric_tribunal)"
+    )
 
     # Decoder & vLLM flags
     parser.add_argument("--inference_type", type=str, default="vllm", choices=["vllm", "openai"], help="Inference backend")
@@ -399,7 +359,17 @@ def parse_arguments():
     parser.add_argument("--log_path", type=str, default=None, help="Log path")
     parser.add_argument("--output_json", type=str, default=None, help="Output JSON path")
     parser.add_argument("--show_errors", type=int, default=5, help="Number of discrepant samples to print")
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # Synchronize --asymmetric and --debate_mode
+    if args.asymmetric is not None:
+        args.debate_mode = "asymmetric_tribunal" if args.asymmetric else "symmetric"
+    elif args.debate_mode == "asymmetric_tribunal":
+        args.asymmetric = True
+    else:
+        args.asymmetric = False
+
+    return args
 
 
 def main():
