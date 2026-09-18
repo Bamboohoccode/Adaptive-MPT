@@ -29,7 +29,6 @@ from mpt_inference import (
     format_prompt,
     decode_batch,
     get_pred,
-    TOTAL_LLM_CALLS,
 )
 
 
@@ -137,69 +136,29 @@ def is_classified_as_ambiguous(pred, item):
     return any(kw in ans_text for kw in undetermined_keywords)
 
 
-def compute_metrics(total, true_amb, true_dis, fast_cnt, fast_amb, fast_dis, adapt_cnt, adapt_dis, adapt_amb):
-    """Compute detailed distribution and percentage metrics for routing classification."""
-    fast_pct_total = (fast_cnt / total * 100) if total > 0 else 0.0
-    fast_amb_pct_fast = (fast_amb / fast_cnt * 100) if fast_cnt > 0 else 0.0
-    fast_amb_recall = (fast_amb / true_amb * 100) if true_amb > 0 else 0.0
-    fast_dis_pct_fast = (fast_dis / fast_cnt * 100) if fast_cnt > 0 else 0.0
-    fast_dis_leak_rate = (fast_dis / true_dis * 100) if true_dis > 0 else 0.0
-
-    adapt_pct_total = (adapt_cnt / total * 100) if total > 0 else 0.0
-    adapt_dis_pct_adapt = (adapt_dis / adapt_cnt * 100) if adapt_cnt > 0 else 0.0
-    adapt_dis_recall = (adapt_dis / true_dis * 100) if true_dis > 0 else 0.0
-    adapt_amb_pct_adapt = (adapt_amb / adapt_cnt * 100) if adapt_cnt > 0 else 0.0
-    adapt_amb_leak_rate = (adapt_amb / true_amb * 100) if true_amb > 0 else 0.0
-
-    routing_acc = ((fast_amb + adapt_dis) / total * 100) if total > 0 else 0.0
-
-    return {
-        "total": total,
-        "true_ambig": true_amb,
-        "true_disambig": true_dis,
-        "routing_acc": routing_acc,
-        "fast_count": fast_cnt,
-        "fast_pct_total": fast_pct_total,
-        "fast_amb_count": fast_amb,
-        "fast_amb_pct_fast": fast_amb_pct_fast,
-        "fast_amb_recall": fast_amb_recall,
-        "fast_dis_count": fast_dis,
-        "fast_dis_pct_fast": fast_dis_pct_fast,
-        "fast_dis_leak_rate": fast_dis_leak_rate,
-        "adapt_count": adapt_cnt,
-        "adapt_pct_total": adapt_pct_total,
-        "adapt_dis_count": adapt_dis,
-        "adapt_dis_pct_adapt": adapt_dis_pct_adapt,
-        "adapt_dis_recall": adapt_dis_recall,
-        "adapt_amb_count": adapt_amb,
-        "adapt_amb_pct_adapt": adapt_amb_pct_adapt,
-        "adapt_amb_leak_rate": adapt_amb_leak_rate,
-    }
-
-
 def evaluate_context_classification(args, models):
-    """Run Context Sufficiency Check and evaluate routing distribution between Fast Path and Adaptive Path."""
+    """Run Context Sufficiency Check and compute classification accuracy against ground truth."""
     tasks = [args.task] if args.task else set_tasks_BBQ()
-
-    overall_counts = {
+    
+    total_metrics = {
         "total": 0,
         "true_ambig": 0,
         "true_disambig": 0,
-        "fast_count": 0,
-        "fast_ambig": 0,
-        "fast_disambig_leak": 0,
-        "adapt_count": 0,
-        "adapt_disambig": 0,
-        "adapt_ambig_leak": 0,
+        "pred_ambig_fast": 0,
+        "pred_disambig_adapt": 0,
+        "correct_fast_ambig": 0,
+        "leaked_disambig_to_fast": 0,
+        "correct_adapt_disambig": 0,
+        "leaked_ambig_to_adapt": 0,
     }
 
     per_task_results = {}
     error_samples = []
 
-    print("\n" + "=" * 115)
-    print("EVALUATING CONTEXT SUFFICIENCY CLASSIFICATION & ROUTING DISTRIBUTION")
-    print(f"Model: {args.models[0]} | Dataset: {args.dataset} | Tasks: {len(tasks)}")
-    print("=" * 115)
+    print("\n" + "=" * 90)
+    print(f"EVALUATING CONTEXT SUFFICIENCY CLASSIFICATION (Masked Reasoning Turn 1)")
+    print(f"Model: {args.models[0]} | Dataset: {args.dataset}")
+    print("=" * 90)
 
     for task_name in tasks:
         data = load_evaluation_data(args, task_name)
@@ -208,14 +167,17 @@ def evaluate_context_classification(args, models):
 
         print(f"\nTask: {task_name:<22} | Samples: {len(data)}")
 
-        # Build prompts for all samples in task (Masked Reasoning)
+        # Build prompts for all samples in task
         prompts = []
+        raw_prompts = []
         for it in data:
-            _, f_prompt = build_masked_prompt(args, it)
+            p_text, f_prompt = build_masked_prompt(args, it)
+            raw_prompts.append(p_text)
             prompts.append(f_prompt)
 
-        # Batch decode with model (or mock)
+        # Batch decode with model
         if getattr(args, "mock", False):
+            # Mock mode for testing pipeline logic without GPU
             responses = []
             for it in data:
                 cond = it.get("context_condition", "")
@@ -226,165 +188,124 @@ def evaluate_context_classification(args, models):
                     gold_label = it.get("label", 0)
                     responses.append(f"The context explicitly states the factual answer. <answer> {gold_label} </answer>")
         else:
-            responses = decode_batch(models, args, prompts, phase="check_classification")
+            responses = decode_batch(models, args, prompts)
 
-        task_total = len(data)
-        task_true_amb = 0
-        task_true_dis = 0
-        task_fast_cnt = 0
-        task_fast_amb = 0
-        task_fast_dis_leak = 0
-        task_adapt_cnt = 0
-        task_adapt_dis = 0
-        task_adapt_amb_leak = 0
+        # Evaluate predictions
+        task_metrics = {
+            "total": len(data),
+            "true_ambig": 0,
+            "true_disambig": 0,
+            "pred_ambig_fast": 0,
+            "pred_disambig_adapt": 0,
+            "correct_fast_ambig": 0,
+            "leaked_disambig_to_fast": 0,
+            "correct_adapt_disambig": 0,
+            "leaked_ambig_to_adapt": 0,
+        }
 
-        for it, resp in zip(data, responses):
+        for idx, (it, resp) in enumerate(zip(data, responses)):
             cond = it.get("context_condition", "unknown")
             is_ambig_gt = (cond == "ambig")
-            if is_ambig_gt:
-                task_true_amb += 1
-            else:
-                task_true_dis += 1
-
             pred = get_pred(resp)
             is_ambig_pred = is_classified_as_ambiguous(pred, it)
 
+            if is_ambig_gt:
+                task_metrics["true_ambig"] += 1
+                total_metrics["true_ambig"] += 1
+            else:
+                task_metrics["true_disambig"] += 1
+                total_metrics["true_disambig"] += 1
+
             if is_ambig_pred:
-                task_fast_cnt += 1
+                task_metrics["pred_ambig_fast"] += 1
+                total_metrics["pred_ambig_fast"] += 1
                 if is_ambig_gt:
-                    task_fast_amb += 1
+                    task_metrics["correct_fast_ambig"] += 1
+                    total_metrics["correct_fast_ambig"] += 1
                 else:
-                    task_fast_dis_leak += 1
+                    task_metrics["leaked_disambig_to_fast"] += 1
+                    total_metrics["leaked_disambig_to_fast"] += 1
                     error_samples.append({
                         "task": task_name,
                         "type": "DISAMBIG_LEAKED_TO_FAST",
-                        "condition": cond,
                         "context": it.get("context"),
                         "question": it.get("question"),
-                        "gold": it.get("label"),
                         "pred": pred,
                         "response": resp,
                     })
             else:
-                task_adapt_cnt += 1
+                task_metrics["pred_disambig_adapt"] += 1
+                total_metrics["pred_disambig_adapt"] += 1
                 if not is_ambig_gt:
-                    task_adapt_dis += 1
+                    task_metrics["correct_adapt_disambig"] += 1
+                    total_metrics["correct_adapt_disambig"] += 1
                 else:
-                    task_adapt_amb_leak += 1
-                    error_samples.append({
-                        "task": task_name,
-                        "type": "AMBIG_LEAKED_TO_ADAPT",
-                        "condition": cond,
-                        "context": it.get("context"),
-                        "question": it.get("question"),
-                        "gold": it.get("label"),
-                        "pred": pred,
-                        "response": resp,
-                    })
+                    task_metrics["leaked_ambig_to_adapt"] += 1
+                    total_metrics["leaked_ambig_to_adapt"] += 1
 
-        # Accumulate overall totals
-        overall_counts["total"] += task_total
-        overall_counts["true_ambig"] += task_true_amb
-        overall_counts["true_disambig"] += task_true_dis
-        overall_counts["fast_count"] += task_fast_cnt
-        overall_counts["fast_ambig"] += task_fast_amb
-        overall_counts["fast_disambig_leak"] += task_fast_dis_leak
-        overall_counts["adapt_count"] += task_adapt_cnt
-        overall_counts["adapt_disambig"] += task_adapt_dis
-        overall_counts["adapt_ambig_leak"] += task_adapt_amb_leak
+            total_metrics["total"] += 1
 
-        # Calculate task metrics
-        task_metrics = compute_metrics(
-            task_total, task_true_amb, task_true_dis,
-            task_fast_cnt, task_fast_amb, task_fast_dis_leak,
-            task_adapt_cnt, task_adapt_dis, task_adapt_amb_leak
-        )
-        per_task_results[task_name] = task_metrics
+        # Calculate Task rates
+        fast_n = task_metrics["pred_ambig_fast"]
+        purity = (task_metrics["correct_fast_ambig"] / fast_n * 100) if fast_n > 0 else 0.0
+        dis_total = task_metrics["true_disambig"]
+        dis_leak_rate = (task_metrics["leaked_disambig_to_fast"] / dis_total * 100) if dis_total > 0 else 0.0
+        acc = ((task_metrics["correct_fast_ambig"] + task_metrics["correct_adapt_disambig"]) / task_metrics["total"] * 100)
 
-        print(
-            f"  -> Routing Acc: {task_metrics['routing_acc']:.1f}% | "
-            f"Fast: {task_metrics['fast_count']} ({task_metrics['fast_pct_total']:.1f}%) [Amb: {task_metrics['fast_amb_pct_fast']:.1f}%, Dis Leak: {task_metrics['fast_dis_pct_fast']:.1f}%] | "
-            f"Adapt: {task_metrics['adapt_count']} ({task_metrics['adapt_pct_total']:.1f}%) [Dis: {task_metrics['adapt_dis_pct_adapt']:.1f}%, Amb Leak: {task_metrics['adapt_amb_pct_adapt']:.1f}%]"
-        )
+        per_task_results[task_name] = {
+            **task_metrics,
+            "purity": purity,
+            "dis_leak_rate": dis_leak_rate,
+            "accuracy": acc,
+        }
+        print(f"  -> Accuracy: {acc:.1f}% | Fast Purity: {purity:.1f}% | Disambig Leak into Fast: {task_metrics['leaked_disambig_to_fast']}/{dis_total} ({dis_leak_rate:.1f}%)")
 
-    # Calculate overall metrics
-    overall_metrics = compute_metrics(
-        overall_counts["total"],
-        overall_counts["true_ambig"],
-        overall_counts["true_disambig"],
-        overall_counts["fast_count"],
-        overall_counts["fast_ambig"],
-        overall_counts["fast_disambig_leak"],
-        overall_counts["adapt_count"],
-        overall_counts["adapt_disambig"],
-        overall_counts["adapt_ambig_leak"],
-    )
-
-    # ── Summary Report: Unified Routing Table ──
+    # ── Summary Report ──
+    print("\n" + "=" * 90)
+    print("SUMMARY RESULTS: CONTEXT SUFFICIENCY CLASSIFICATION")
+    print("=" * 90)
     header = (
-        f"{'Task':<23} {'Samples':<8} {'Routing Acc':<13} "
-        f"{'Fast Path: Total (% of all)'} | {'Amb %'}  | {'Disamb % (Leak)'}   "
-        f"{'Adaptive Path: Total (% of all)'} | {'Disamb %'}  | {'Amb % (Leak)'}"
+        f"{'Task':<23} {'Samples':<8} {'Accuracy':<10} "
+        f"{'Fast Total':<12} {'Fast Purity':<14} {'Disamb Leak':<14}"
     )
-    table_width = len(header)
-
-    print("\n" + "=" * table_width)
-    print("SUMMARY RESULTS: CONTEXT SUFFICIENCY ROUTING DISTRIBUTION")
-    print("=" * table_width)
     print(header)
-    print("-" * table_width)
+    print("-" * 90)
 
     for task_name, m in per_task_results.items():
-        f_total = f"{m['fast_count']} ({m['fast_pct_total']:.1f}%)"
-        f_amb = f"{m['fast_amb_pct_fast']:.1f}%"
-        f_dis = f"{m['fast_dis_pct_fast']:.1f}%"
-        fast_cell = f"{f_total:^27} | {f_amb:^6} | {f_dis:^17}"
+        fp_str = f"{m['pred_ambig_fast']} ({m['pred_ambig_fast']/m['total']*100:.1f}%)"
+        leak_str = f"{m['leaked_disambig_to_fast']} ({m['dis_leak_rate']:.1f}%)"
+        print(
+            f"{task_name:<23} {m['total']:<8} {m['accuracy']:.1f}%     "
+            f"{fp_str:<12} {m['purity']:.1f}%        {leak_str:<14}"
+        )
 
-        a_total = f"{m['adapt_count']} ({m['adapt_pct_total']:.1f}%)"
-        a_dis = f"{m['adapt_dis_pct_adapt']:.1f}%"
-        a_amb = f"{m['adapt_amb_pct_adapt']:.1f}%"
-        adapt_cell = f"{a_total:^31} | {a_dis:^9} | {a_amb:^14}"
+    print("-" * 90)
+    tot = total_metrics["total"]
+    overall_acc = ((total_metrics["correct_fast_ambig"] + total_metrics["correct_adapt_disambig"]) / tot * 100) if tot > 0 else 0.0
+    tot_fast = total_metrics["pred_ambig_fast"]
+    overall_purity = (total_metrics["correct_fast_ambig"] / tot_fast * 100) if tot_fast > 0 else 0.0
+    tot_dis = total_metrics["true_disambig"]
+    overall_leak = (total_metrics["leaked_disambig_to_fast"] / tot_dis * 100) if tot_dis > 0 else 0.0
 
-        acc_str = f"{m['routing_acc']:.1f}%"
-        print(f"{task_name:<23} {m['total']:<8} {acc_str:<13} {fast_cell}   {adapt_cell}")
+    print(
+        f"{'OVERALL TOTAL':<23} {tot:<8} {overall_acc:.1f}%     "
+        f"{tot_fast:<12} {overall_purity:.1f}%        {total_metrics['leaked_disambig_to_fast']} ({overall_leak:.1f}%)"
+    )
+    print("=" * 90)
 
-    print("-" * table_width)
-
-    tot_f_total = f"{overall_metrics['fast_count']} ({overall_metrics['fast_pct_total']:.1f}%)"
-    tot_f_amb = f"{overall_metrics['fast_amb_pct_fast']:.1f}%"
-    tot_f_dis = f"{overall_metrics['fast_dis_pct_fast']:.1f}%"
-    tot_fast_cell = f"{tot_f_total:^27} | {tot_f_amb:^6} | {tot_f_dis:^17}"
-
-    tot_a_total = f"{overall_metrics['adapt_count']} ({overall_metrics['adapt_pct_total']:.1f}%)"
-    tot_a_dis = f"{overall_metrics['adapt_dis_pct_adapt']:.1f}%"
-    tot_a_amb = f"{overall_metrics['adapt_amb_pct_adapt']:.1f}%"
-    tot_adapt_cell = f"{tot_a_total:^31} | {tot_a_dis:^9} | {tot_a_amb:^14}"
-
-    tot_acc_str = f"{overall_metrics['routing_acc']:.1f}%"
-    print(f"{'OVERALL TOTAL':<23} {overall_metrics['total']:<8} {tot_acc_str:<13} {tot_fast_cell}   {tot_adapt_cell}")
-    print("=" * table_width)
-
-    # ── Key Metric Highlights ──
     print(f"\n>>> KEY METRIC HIGHLIGHTS:")
-    print(f"    1. Total Samples Evaluated      : {overall_metrics['total']} (True Amb: {overall_metrics['true_ambig']}, True Disamb: {overall_metrics['true_disambig']})")
-    print(f"    2. Fast Path Breakdown          : {overall_metrics['fast_count']} samples ({overall_metrics['fast_pct_total']:.2f}% of all)")
-    print(f"       - Ambiguous Composition     : {overall_metrics['fast_amb_count']} ({overall_metrics['fast_amb_pct_fast']:.2f}% of Fast Path, Recall: {overall_metrics['fast_amb_recall']:.2f}%)")
-    print(f"       - Disambiguated Leak (Error) : {overall_metrics['fast_dis_count']} ({overall_metrics['fast_dis_pct_fast']:.2f}% of Fast Path, Leak Rate: {overall_metrics['fast_dis_leak_rate']:.2f}%)")
-    print(f"    3. Adaptive Path Breakdown      : {overall_metrics['adapt_count']} samples ({overall_metrics['adapt_pct_total']:.2f}% of all)")
-    print(f"       - Disambiguated Composition : {overall_metrics['adapt_dis_count']} ({overall_metrics['adapt_dis_pct_adapt']:.2f}% of Adaptive Path, Recall: {overall_metrics['adapt_dis_recall']:.2f}%)")
-    print(f"       - Ambiguous Leak (Error)     : {overall_metrics['adapt_amb_count']} ({overall_metrics['adapt_amb_pct_adapt']:.2f}% of Adaptive Path, Leak Rate: {overall_metrics['adapt_amb_leak_rate']:.2f}%)")
-    correct_routing_count = overall_metrics['fast_amb_count'] + overall_metrics['adapt_dis_count']
-    print(f"    4. Overall Routing Accuracy     : {overall_metrics['routing_acc']:.2f}% ({correct_routing_count}/{overall_metrics['total']} correctly routed)")
-    print(f"    5. Total LLM Calls Executed     : {TOTAL_LLM_CALLS}\n")
+    print(f"    1. Overall Routing Accuracy : {overall_acc:.2f}%")
+    print(f"    2. Fast Path Purity         : {overall_purity:.2f}% (Target: near 100% Ambig in Fast Path)")
+    print(f"    3. Disambig Leak Rate       : {overall_leak:.2f}% ({total_metrics['leaked_disambig_to_fast']}/{tot_dis} disambig leaked to fast path)")
+    print(f"    4. Ambig Recall to Fast     : {total_metrics['correct_fast_ambig']/total_metrics['true_ambig']*100:.2f}%\n")
 
-    # Display leaked / error samples if requested
+    # Print error sample if requested
     if error_samples and args.show_errors:
-        print(f"\nSample Leaked / Misclassified Samples ({len(error_samples)} total):")
+        print(f"\nSample Disambig Leaked to Fast Path ({len(error_samples)} total):")
         for s in error_samples[:args.show_errors]:
-            print(f"\n[Task: {s['task']}] Leak Type: {s['type']} | Condition: {s['condition']} | Gold Label: {s['gold']}")
-            print(f"Context: {s['context']}")
+            print(f"\n[Task: {s['task']}] Context: {s['context']}")
             print(f"Question: {s['question']}")
-            print(f"Pred Option: {s['pred']} | Response Snippet:\n{s['response'][:200]}...")
+            print(f"Pred: {s['pred']} | Response Snippet:\n{s['response'][:200]}...")
 
     # Save to JSON if requested
     if args.output_json:
@@ -392,70 +313,19 @@ def evaluate_context_classification(args, models):
         with open(args.output_json, "w", encoding="utf-8") as f:
             json.dump({
                 "overall": {
-                    "total_samples": overall_metrics["total"],
-                    "true_ambiguous": overall_metrics["true_ambig"],
-                    "true_disambiguated": overall_metrics["true_disambig"],
-                    "routing_accuracy": overall_metrics["routing_acc"],
-                    "fast_path": {
-                        "total": overall_metrics["fast_count"],
-                        "pct_of_all": overall_metrics["fast_pct_total"],
-                        "ambiguous_count": overall_metrics["fast_amb_count"],
-                        "ambiguous_pct_of_fast": overall_metrics["fast_amb_pct_fast"],
-                        "ambiguous_recall": overall_metrics["fast_amb_recall"],
-                        "disambiguated_leak_count": overall_metrics["fast_dis_count"],
-                        "disambiguated_leak_pct_of_fast": overall_metrics["fast_dis_pct_fast"],
-                        "disambiguated_leak_rate": overall_metrics["fast_dis_leak_rate"],
-                    },
-                    "adaptive_path": {
-                        "total": overall_metrics["adapt_count"],
-                        "pct_of_all": overall_metrics["adapt_pct_total"],
-                        "disambiguated_count": overall_metrics["adapt_dis_count"],
-                        "disambiguated_pct_of_adapt": overall_metrics["adapt_dis_pct_adapt"],
-                        "disambiguated_recall": overall_metrics["adapt_dis_recall"],
-                        "ambiguous_leak_count": overall_metrics["adapt_amb_count"],
-                        "ambiguous_leak_pct_of_adapt": overall_metrics["adapt_amb_pct_adapt"],
-                        "ambiguous_leak_rate": overall_metrics["adapt_amb_leak_rate"],
-                    },
-                    "total_llm_calls": TOTAL_LLM_CALLS,
+                    "accuracy": overall_acc,
+                    "fast_purity": overall_purity,
+                    "disambig_leak_rate": overall_leak,
+                    **total_metrics
                 },
-                "per_task": {
-                    task_name: {
-                        "total_samples": m["total"],
-                        "true_ambiguous": m["true_ambig"],
-                        "true_disambiguated": m["true_disambig"],
-                        "routing_accuracy": m["routing_acc"],
-                        "fast_path": {
-                            "total": m["fast_count"],
-                            "pct_of_all": m["fast_pct_total"],
-                            "ambiguous_count": m["fast_amb_count"],
-                            "ambiguous_pct_of_fast": m["fast_amb_pct_fast"],
-                            "ambiguous_recall": m["fast_amb_recall"],
-                            "disambiguated_leak_count": m["fast_dis_count"],
-                            "disambiguated_leak_pct_of_fast": m["fast_dis_pct_fast"],
-                            "disambiguated_leak_rate": m["fast_dis_leak_rate"],
-                        },
-                        "adaptive_path": {
-                            "total": m["adapt_count"],
-                            "pct_of_all": m["adapt_pct_total"],
-                            "disambiguated_count": m["adapt_dis_count"],
-                            "disambiguated_pct_of_adapt": m["adapt_dis_pct_adapt"],
-                            "disambiguated_recall": m["adapt_dis_recall"],
-                            "ambiguous_leak_count": m["adapt_amb_count"],
-                            "ambiguous_leak_pct_of_adapt": m["adapt_amb_pct_adapt"],
-                            "ambiguous_leak_rate": m["adapt_amb_leak_rate"],
-                        },
-                    }
-                    for task_name, m in per_task_results.items()
-                },
+                "per_task": per_task_results,
                 "error_samples": error_samples,
             }, f, indent=2, ensure_ascii=False)
         print(f"Detailed results saved to {args.output_json}")
 
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(
-        description="Check context sufficiency classification and routing distribution before full MPT inference"
-    )
+    parser = argparse.ArgumentParser(description="Check context sufficiency classification accuracy before full MPT inference")
 
     parser.add_argument(
         "--models", type=str, nargs="+", default=["meta-llama/Llama-3.1-8B-Instruct"],
@@ -503,7 +373,7 @@ def parse_arguments():
     )
     parser.add_argument(
         "--max_tokens", type=int, default=128,
-        help="Max generated tokens for reasoning"
+        help="Max generated tokens for Turn 1 reasoning"
     )
     parser.add_argument(
         "--summary_id", type=int, default=0,

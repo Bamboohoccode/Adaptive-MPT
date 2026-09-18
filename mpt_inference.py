@@ -23,6 +23,8 @@ from prompts import (
     CONSTRAINT_PROMPT_BBQ, CONSTRAINT_PROMPT_STS,
     UNCERTAINTY_WARNING, BIAS_WARNING, LOGICAL_PROMPT, REPROMPT,
     LOGICAL_PROMPT_MASKED, REPROMPT_MASKED, REVIEW_PROMPT_MASKED, SUMMARY_PROMPT_MASKED,
+    LOGICAL_PROMPT_FACT_EXTRACTION, REVIEW_PROMPT_FACT_EXTRACTION,
+    SUMMARY_PROMPT_FACT_EXTRACTION, REPROMPT_FACT_EXTRACTION,
 )
 from cross_encoder import (
     CrossEncoderRouter, LABEL_TO_PERSONA,
@@ -202,13 +204,7 @@ def get_groups(args, line):
 
 def get_personas_from_labels(bias_labels):
     """Map Cross-Encoder detected bias labels to persona description strings."""
-    personas = []
-    for label in bias_labels:
-        if label in LABEL_TO_PERSONA:
-            personas.append(LABEL_TO_PERSONA[label])
-        elif isinstance(label, str) and label.lower() in LABEL_TO_PERSONA:
-            personas.append(LABEL_TO_PERSONA[label.lower()])
-    return personas
+    return [LABEL_TO_PERSONA[label] for label in bias_labels if label in LABEL_TO_PERSONA]
 
 def mask_entities(item):
     """Mask character entities in context, question, and options with [Person A] and [Person B]
@@ -293,7 +289,7 @@ def is_classified_as_ambiguous(pred, item):
     ]
     return any(kw in ans_text for kw in undetermined_keywords)
 
-def get_prompt(args, input_example, method, is_init=True, warnings="", logical=False, is_summary=False, masked=False):
+def get_prompt(args, input_example, method, is_init=True, warnings="", logical=False, is_summary=False, masked=False, is_reprompt=False):
     dataset = args.dataset
 
     context = input_example["context"]
@@ -305,15 +301,19 @@ def get_prompt(args, input_example, method, is_init=True, warnings="", logical=F
     elif dataset == "stereoset":
         ask_prompt = CONSTRAINT_PROMPT_STS.format(question_prompt=QUESTION_PROMPT_STEREOSET, context=context, question=question, options=options)
 
-    if is_init:
+    fact_ext = getattr(args, "feature_extraction", False)
+
+    if is_reprompt:
+        prompt = REPROMPT_MASKED if masked else (REPROMPT_FACT_EXTRACTION if fact_ext else REPROMPT)
+    elif is_init:
         # When entity-masked, 100% decouple from bias: omit all bias/uncertainty warnings
         prompt = ask_prompt if masked else (ask_prompt + warnings)
         if logical or masked:
-            prompt += LOGICAL_PROMPT_MASKED if masked else LOGICAL_PROMPT
+            prompt += LOGICAL_PROMPT_MASKED if masked else (LOGICAL_PROMPT_FACT_EXTRACTION if fact_ext else LOGICAL_PROMPT)
     elif is_summary:
-        prompt = SUMMARY_PROMPT_MASKED if masked else SUMMARY_PROMPT
+        prompt = SUMMARY_PROMPT_MASKED if masked else (SUMMARY_PROMPT_FACT_EXTRACTION if fact_ext else SUMMARY_PROMPT)
     else:
-        prompt = REVIEW_PROMPT_MASKED if masked else REVIEW_PROMPT
+        prompt = REVIEW_PROMPT_MASKED if masked else (REVIEW_PROMPT_FACT_EXTRACTION if fact_ext else REVIEW_PROMPT)
 
     if args.inference_type == "openai":
         prompt += "Restrict your response to two sentences. "
@@ -524,7 +524,6 @@ def write_results(all_results, task_info):
             line.pop('_output_file', None)
             line.pop('_ce_scores', None)
             line.pop('_ce_labels', None)
-            line.pop('_early_exit_round', None)
         
         with xopen(output_file, "w", encoding="utf-8") as fout:
             for line in task_results:
@@ -571,7 +570,8 @@ def fast_path_inference(args, models, indices, method_name, all_results, turn1_c
     # ── Turn 2: Reprompting (logical_reprompting only) ──
     if args.fast_path_method == "logical_reprompting":
         reprompt_prompts = []
-        reprompt_text = REPROMPT_MASKED if is_masked else REPROMPT
+        fact_ext = getattr(args, "feature_extraction", False)
+        reprompt_text = REPROMPT_MASKED if is_masked else (REPROMPT_FACT_EXTRACTION if fact_ext else REPROMPT)
         for j, i in enumerate(indices):
             reprompt_prompt = format_prompt(
                 args, reprompt_text + POSTFIX_PROMPT,
@@ -650,16 +650,9 @@ def adaptive_path_inference(args, models, indices, method_name, all_results, rou
     max_agents = max(len(p) for p in per_sample_personas)
     pred_history = [[[] for _ in range(args.num_rounds + 1)] for _ in range(N)]
     debate_history = [[[] for _ in range(args.num_rounds + 1)] for _ in range(N)]
-    min_round_debate = getattr(args, "min_round_debate", 1)
-    early_exited = {}  # j -> (round, agreed_pred, response_str)
 
     # ── Multi-round debate ──
     for round in range(args.num_rounds + 1):
-        # Stop debate rounds early if all samples reached consensus
-        if len(early_exited) == N:
-            log_data(f"Adaptive Path: All {N} samples early-exited before round {round}.", args)
-            break
-
         round_history = [[] for _ in range(N)]
 
         for agent_id in range(max_agents):
@@ -667,8 +660,6 @@ def adaptive_path_inference(args, models, indices, method_name, all_results, rou
             valid_map = []
 
             for j in range(N):
-                if j in early_exited:
-                    continue
                 if agent_id >= len(per_sample_personas[j]):
                     continue
                 i = indices[j]
@@ -702,60 +693,30 @@ def adaptive_path_inference(args, models, indices, method_name, all_results, rou
                     round_history[j].append(resp)
 
         for j in range(N):
-            if j not in early_exited:
-                debate_history[j][round].extend(round_history[j])
-
-        # ── Check Early-Exit Consensus ──
-        if round >= min_round_debate:
-            for j in range(N):
-                if j in early_exited:
-                    continue
-                preds_this_round = [p[0] for p in pred_history[j][round]]
-                num_expected = len(per_sample_personas[j])
-                if len(preds_this_round) == num_expected and len(set(preds_this_round)) == 1:
-                    agreed_pred = preds_this_round[0]
-                    if agreed_pred != -1:
-                        chosen_resp = round_history[j][0] if round_history[j] else f"<answer> {agreed_pred} </answer>"
-                        early_exited[j] = (round, agreed_pred, chosen_resp)
-                        log_data(f"Adaptive Path: Sample {indices[j]} (idx {j}) reached unanimous consensus on option {agreed_pred} at round {round}. Early-exit triggered!", args)
-
-    if early_exited:
-        log_data(f"Adaptive Path summary: {len(early_exited)}/{N} samples reached early consensus.", args)
+            debate_history[j][round].extend(round_history[j])
 
     # ── Final summary inference ──
     final_prompts = []
-    summary_map = []
-    final_responses = [None] * N
-
     for j in range(N):
-        if j in early_exited:
-            final_responses[j] = early_exited[j][2]
-        else:
-            i = indices[j]
-            item = mask_entities(all_results[i]) if is_masked else all_results[i]
-            prompt = get_prompt(args, item, method, is_init=False, is_summary=True, masked=is_masked)
-            final_prompts.append(format_prompt(
-                args, prompt,
-                sys_prompt=DEFAULT_SYS_PROMPT,
-                thinking_history=debate_history[j],
-                id=args.summary_id,
-            ))
-            summary_map.append(j)
+        i = indices[j]
+        item = mask_entities(all_results[i]) if is_masked else all_results[i]
+        prompt = get_prompt(args, item, method, is_init=False, is_summary=True, masked=is_masked)
+        final_prompts.append(format_prompt(
+            args, prompt,
+            sys_prompt=DEFAULT_SYS_PROMPT,
+            thinking_history=debate_history[j],
+            id=args.summary_id,
+        ))
 
-    if final_prompts:
-        log_data(f"\n{'='*30}\nAdaptive Path, Final summary ({len(final_prompts)} non-early-exit samples):", args)
-        judge_responses = decode_batch(models, args, final_prompts, phase="adaptive_summary")
-        if judge_responses:
-            log_data(f"\n{'-'*30}\nFinal response sample:\n{judge_responses[0]}", args)
-        for resp_idx, j in enumerate(summary_map):
-            final_responses[j] = judge_responses[resp_idx]
+    log_data(f"\n{'='*30}\nAdaptive Path, Final summary:", args)
+    final_responses = decode_batch(models, args, final_prompts, phase="adaptive_summary")
+    if final_responses:
+        log_data(f"\n{'-'*30}\nFinal response sample:\n{final_responses[0]}", args)
 
     # ── Write results (same format as MPT) ──
     for j in range(N):
         i = indices[j]
-        pred = early_exited[j][1] if j in early_exited else get_pred(final_responses[j])
-        if j in early_exited:
-            all_results[i]["_early_exit_round"] = early_exited[j][0]
+        pred = get_pred(final_responses[j])
         if method_name in all_results[i] and not args.overwrite:
             all_results[i][method_name][0].append(pred)
             all_results[i][method_name][1].append(pred_history[j])
@@ -944,11 +905,6 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "--min_round_debate", type=int, default=1,
-        help="Minimum number of debate rounds before early-exit consensus can be triggered (default: 1)"
-    )
-
-    parser.add_argument(
         "--num_attempts", type=int, default=5,
         help="Number of attempts"
     )
@@ -1063,7 +1019,14 @@ def parse_arguments():
         help="Entity masking mode: none (disabled), fast_path (option 1: Fast Path only), or both (option 2: both paths)"
     )
 
+    parser.add_argument(
+        "--feature_extraction", "--fact_extraction", action="store_true",
+        help="Use extractive evidence grounding prompts ('Quote-First' fact extraction)"
+    )
+
     args = parser.parse_args()
+
+    args.fact_extraction = args.feature_extraction
 
     if args.method.endswith("no_general"):
         args.no_general = True
