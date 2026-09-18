@@ -343,6 +343,44 @@ def parse_arguments():
     type=float,
     default=1.0,  # hoặc giá trị mặc định bạn mong muốn, vd: 0.0 hoặc 0.7
     help="Sampling temperature")
+        # ── Generation & Decoder flags (required by Decoder in mpt_inference.py) ──
+    parser.add_argument(
+        "--inference_type", type=str, default="vllm",
+        choices=["vllm", "openai"],
+        help="Inference type used to generate responses"
+    )
+    parser.add_argument(
+        "--temperature", type=float, default=1.0,
+        help="Temperature used to generate responses"
+    )
+    parser.add_argument(
+        "--top_p", type=float, default=1.0,
+        help="Top-p used to generate responses"
+    )
+    parser.add_argument(
+        "--max_tokens", type=int, default=512,
+        help="The maximum number of tokens the model output"
+    )
+    parser.add_argument(
+        "--chat_templates", action="store_true",
+        help="Whether to use chat templates"
+    )
+    parser.add_argument(
+        "--num_gpus", type=int, default=1,  # Kaggle thường là 1 hoặc 2 GPU (T4x2)
+        help="Number of GPUs to use for vLLM tensor parallelism"
+    )
+    parser.add_argument(
+        "--gpu_memory_utilization", type=float, default=0.85,
+        help="GPU memory utilization ratio for vLLM"
+    )
+    parser.add_argument(
+        "--max_model_len", type=int, default=8192,  # Kaggle GPU (16GB VRAM) nên để 4096 - 8192 để tránh OOM vLLM
+        help="Maximum model context length for vLLM"
+    )
+    parser.add_argument(
+        "--summary_id", type=int, default=0,
+        help="Id of the model used to generate the summary"
+    )
     return parser.parse_args()
 
 
