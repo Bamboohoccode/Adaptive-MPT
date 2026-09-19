@@ -47,7 +47,7 @@ def biased_a(r):
     group = r['answer_info'][f"ans{r['pred']}"][1]
     if group == "unknown":
         return False
-    biased_group = r['additional_metadata']['stereotyped_groups']
+    biased_group = list(r['additional_metadata']['stereotyped_groups'])
 
 
     if r['category'] == "Nationality":
@@ -98,7 +98,7 @@ def counter_a(r):
     group = r['answer_info'][f"ans{r['pred']}"][1]
     if group == "unknown":
         return False
-    biased_group = r['additional_metadata']['stereotyped_groups']
+    biased_group = list(r['additional_metadata']['stereotyped_groups'])
 
 
     if r['category'] == "Nationality":

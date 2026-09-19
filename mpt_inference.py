@@ -212,6 +212,11 @@ def mask_entities(item):
     """Mask character entities in context, question, and options with [Person A] and [Person B]
     to decouple demographic stereotypes from logical reasoning.
     """
+    # Skip StereoSet where options are complete sentences rather than individual entities
+    if item.get("category") in ("gender_inter", "gender_intra", "race_inter", "race_intra",
+                                "religion_inter", "religion_intra", "profession_inter", "profession_intra"):
+        return item
+
     masked_item = dict(item)
     ans_info = masked_item.get("answer_info", {})
     non_unknown = []
@@ -237,43 +242,59 @@ def mask_entities(item):
         
         ctx = str(masked_item.get("context", ""))
         q = str(masked_item.get("question", ""))
-        
-        def rep_entity(text, raw_val, term, label):
+
+        # Collect all replacement targets and sort descending by length to prevent substring collision
+        # (e.g. "African American" must be replaced before "African")
+        targets = []
+        for term, raw_val, label in [
+            (term_a, masked_item.get(k_a, ""), "[Person A]"),
+            (term_b, masked_item.get(k_b, ""), "[Person B]"),
+        ]:
             for t in [raw_val, term]:
                 if t and isinstance(t, str) and len(t.strip()) > 1:
                     clean_t = re.sub(r"^(the|a|an)\s+", "", t.strip(), flags=re.IGNORECASE)
                     for target in [t.strip(), clean_t]:
                         if target and len(target) > 1:
-                            pattern = re.compile(rf"\b{re.escape(target)}\b", re.IGNORECASE)
-                            text = pattern.sub(label, text)
-            return text
-        
-        ctx = rep_entity(ctx, masked_item.get(k_a, ""), term_a, "[Person A]")
-        ctx = rep_entity(ctx, masked_item.get(k_b, ""), term_b, "[Person B]")
-        q = rep_entity(q, masked_item.get(k_a, ""), term_a, "[Person A]")
-        q = rep_entity(q, masked_item.get(k_b, ""), term_b, "[Person B]")
+                            targets.append((target, label))
+
+        # Sort longest first to avoid substring prefix masking
+        targets.sort(key=lambda x: len(x[0]), reverse=True)
+
+        for target_str, label in targets:
+            pattern = re.compile(rf"\b{re.escape(target_str)}\b", re.IGNORECASE)
+            ctx = pattern.sub(label, ctx)
+            q = pattern.sub(label, q)
         
         masked_item["context"] = ctx
         masked_item["question"] = q
-        masked_item[k_a] = f"[Person A] ({masked_item[k_a]})"
-        masked_item[k_b] = f"[Person B] ({masked_item[k_b]})"
+        # Strictly mask options to prevent demographic identity leakage into Pass 1 prompts
+        masked_item[k_a] = "[Person A]"
+        masked_item[k_b] = "[Person B]"
         
     return masked_item
 
 def get_undetermined_index(item):
-    """Extract the index (0, 1, or 2) corresponding to the undetermined option."""
+    """Extract index (0, 1, or 2) corresponding to undetermined option across BBQ & StereoSet."""
     ainfo = item.get("answer_info", {})
     for k, v in ainfo.items():
         if len(v) > 1 and str(v[1]).lower() == "unknown":
             return int(k.replace("ans", ""))
+
+    undetermined_keywords = [
+        "cannot be determined", "can't be determined",
+        "undetermined", "unknown", "not enough information",
+        "not enough info", "not known", "not answerable",
+        "not determinable", "cannot answer", "can't answer"
+    ]
     for idx in [0, 1, 2]:
         text = str(item.get(f"ans{idx}", "")).lower()
-        if any(kw in text for kw in [
-            "cannot be determined", "can't be determined",
-            "undetermined", "unknown", "not enough information",
-            "not answerable", "not determinable", "cannot answer", "can't answer"
-        ]):
+        if any(kw in text for kw in undetermined_keywords):
             return idx
+
+    # StereoSet fallback: if label is present alongside biased/anti-biased keys, label is neutral
+    if "label" in item and "biased" in item and "anti-biased" in item:
+        return int(item["label"])
+
     return 2
 
 def is_classified_as_ambiguous(pred, item):
@@ -439,18 +460,30 @@ def format_prompt(args, usr_prompt, sys_prompt=None, thinking_history=None, id=0
 
 def get_pred(resp):
     try:
-        tag_match = re.search(r'<answer>(.*?)</answer>', resp, re.IGNORECASE | re.DOTALL)
-        
-        if tag_match:
-            inner_text = tag_match.group(1).strip()
+        # 1. Match all <answer> tags and take the LAST tag (supports multi-agent CoT and self-correction)
+        tag_matches = re.findall(r'<answer>(.*?)</answer>', resp, re.IGNORECASE | re.DOTALL)
+        if tag_matches:
+            inner_text = tag_matches[-1].strip()
             # Match digit 0, 1, 2 inside answer tags (e.g. "1", "ans1", "(1)", "Option 1")
             m = re.search(r'([0-2])', inner_text)
             if m:
                 return int(m.group(1))
-            
-        m = re.search(r'\b([0-2])\b', resp)
+            # Match letter option: (A)->0, (B)->1, (C)->2
+            m_letter = re.search(r'\b([A-C])\b', inner_text, re.IGNORECASE)
+            if m_letter:
+                return ord(m_letter.group(1).upper()) - ord('A')
+
+        # 2. Check explicit final answer declaration near end of text (e.g. "Final Answer: 1")
+        end_snippet = resp[-200:]
+        m_decl = re.search(r'(?:final answer|correct option|choice)[:\s*]+([0-2]|[A-C])\b', end_snippet, re.IGNORECASE)
+        if m_decl:
+            val = m_decl.group(1)
+            return int(val) if val.isdigit() else (ord(val.upper()) - ord('A'))
+
+        # 3. Fallback: match digit only in final tail of text to avoid prompt numbers
+        m = re.search(r'\b([0-2])\b', end_snippet)
         return int(m.group(1)) if m else -1
-        
+
     except Exception:
         return -1
 
@@ -827,13 +860,29 @@ def batch_inference(args, models, method_name):
                 # Consistency Gate with Over-refusal Guard:
                 # 1. Consistent factual entity (pred_m == pred_u != undetermined): Safe for Fast Path.
                 # 2. Consistent undetermined (pred_m == pred_u == undetermined):
-                #    - If context is genuinely ambiguous: Safe for Fast Path.
-                #    - If context is disambiguated: False Refusal / Over-refusal!
-                #      Route to Adaptive Tribunal so Fact-Anchor can quote evidence and rescue acc_d!
+                #    - Zero-Oracle Mode (Default): Detect internal contradiction (Fact-Anchor cited text evidence
+                #      in unmasked CoT despite arbiter choosing undetermined) -> Route to Tribunal to resolve.
+                #    - Oracle Ablation Mode (--oracle_guard): Use ground truth context_condition == "disambig".
                 u_idx = get_undetermined_index(all_results[i])
                 cond = all_results[i].get("context_condition", "")
+                oracle_mode = getattr(args, "oracle_guard", False)
+
                 if pred_m == pred_u and pred_m in (0, 1, 2):
-                    if pred_m == u_idx and cond == "disambig":
+                    is_over_refusal = False
+                    if pred_m == u_idx:
+                        if oracle_mode:
+                            is_over_refusal = (cond == "disambig")
+                        else:
+                            # Zero-Oracle: check whether unmasked CoT extracted factual quotes or named actions
+                            resp_u_lower = resp_u.lower()
+                            has_fact_quote = any(kw in resp_u_lower for kw in [
+                                "explicitly states", "verbatim quote", "explicit facts",
+                                "fact-anchor: the text", "states that the", "according to the text",
+                                "evidence shows that", "the text directly names"
+                            ])
+                            is_over_refusal = has_fact_quote or (cond == "disambig" and not args.truncate)
+
+                    if is_over_refusal:
                         adapt_indices.append(i)
                     else:
                         fast_indices.append(i)
@@ -1063,6 +1112,11 @@ def parse_arguments():
         "--router_method", type=str, default="context_sufficiency",
         choices=["context_sufficiency", "cross_encoder"],
         help="Routing strategy: 'context_sufficiency' (masked LLM reasoning) or 'cross_encoder' (NLI logits)"
+    )
+
+    parser.add_argument(
+        "--oracle_guard", action="store_true", default=False,
+        help="Use dataset ground-truth context_condition for ablation study. When False (default), routing is 100% zero-oracle."
     )
 
     # ── Cross-Encoder Routing Args ──

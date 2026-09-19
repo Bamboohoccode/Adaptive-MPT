@@ -1,7 +1,11 @@
 import json
 import os
+import hashlib
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
+def _hash_premise(premise):
+    return hashlib.sha256(premise.encode("utf-8")).hexdigest()
 
 # ── Bias-Evidence Statements for Cross-Encoder Scoring ──
 BIAS_STATEMENTS = {
@@ -83,7 +87,7 @@ class CrossEncoderRouter:
         
         Returns {label: probability}.
         """
-        key = hash(premise)
+        key = _hash_premise(premise)
         if key in self._cache:
             return self._cache[key]
 
@@ -103,7 +107,7 @@ class CrossEncoderRouter:
 
     def score_batch(self, premises, batch_size=32):
         """Score multiple premises with caching and batching."""
-        uncached = [p for p in premises if hash(p) not in self._cache]
+        uncached = [p for p in premises if _hash_premise(p) not in self._cache]
         if uncached:
             for p in uncached:
                 self.score(p)
