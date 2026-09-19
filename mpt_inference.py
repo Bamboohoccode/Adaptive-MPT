@@ -274,9 +274,7 @@ def mask_entities(item):
     return masked_item
 
 def get_undetermined_index(item):
-    """Extract index (0, 1, or 2) corresponding to undetermined option across BBQ & StereoSet.
-    Inspects answer_info and options text for undetermined keywords. If not found, returns -1.
-    """
+    """Extract index (0, 1, or 2) corresponding to undetermined option across BBQ & StereoSet."""
     ainfo = item.get("answer_info", {})
     for k, v in ainfo.items():
         if len(v) > 1 and str(v[1]).lower() == "unknown":
@@ -303,7 +301,7 @@ def is_classified_as_ambiguous(pred, item):
         return True
 
     u_idx = get_undetermined_index(item)
-    if u_idx != -1 and pred == u_idx:
+    if pred == u_idx:
         return True
 
     ans_text = str(item.get(f"ans{pred}", "")).lower()
@@ -313,47 +311,6 @@ def is_classified_as_ambiguous(pred, item):
         "unknown", "not determinable", "not answerable"
     ]
     return any(kw in ans_text for kw in undetermined_keywords)
-
-def is_evidence_grounded(resp_u, context=""):
-    """Check if resp_u contains factual grounding keywords or quotes text directly matching the context."""
-    if not resp_u:
-        return False
-
-    resp_u_lower = resp_u.lower()
-    grounding_keywords = (
-        "explicitly states", "verbatim quote", "explicit facts",
-        "states that", "according to the text", "evidence shows",
-        "directly names", "the text specifies", "the passage states",
-        "context states", "fact-anchor: the text", "the text directly names",
-        "evidence indicates", "explicitly mentions",
-        "context specifies", "passage specifies", "text specifies",
-    )
-    if any(kw in resp_u_lower for kw in grounding_keywords):
-        return True
-
-    if context:
-        ctx_lower = context.lower()
-        # Check explicit quotation marks matching context (at least 8 chars)
-        quotes = re.findall(r'["“\']([^"”\']{8,})["”\']', resp_u)
-        for q in quotes:
-            if q.strip().lower() in ctx_lower:
-                return True
-
-        # Check if any substantive clause, sentence, or 4+ word phrase from context (>= 18 chars) appears in resp_u
-        clauses = [c.strip().lower() for c in re.split(r'[,.?!;:]\s*', context) if len(c.strip()) >= 15]
-        for clause in clauses:
-            if clause in resp_u_lower:
-                return True
-
-        # Check consecutive word phrase overlap (>= 4 words and >= 18 characters)
-        words = re.findall(r'\b\w+\b', context)
-        for w_len in (6, 5, 4):
-            for start_idx in range(len(words) - w_len + 1):
-                phrase = " ".join(words[start_idx:start_idx + w_len]).lower()
-                if len(phrase) >= 18 and phrase in resp_u_lower:
-                    return True
-
-    return False
 
 def get_prompt(args, input_example, method, is_init=True, warnings="", logical=False, is_summary=False, masked=False, is_reprompt=False):
     dataset = args.dataset
@@ -896,51 +853,34 @@ def batch_inference(args, models, method_name):
                 # Store the unmasked response in turn1_cache for Fast Path direct output
                 turn1_cache[i] = (turn1_texts_u[i], resp_u)
 
-                # Consistency Gate Routing:
-                # Controlled by --fast_path_scope:
-                # - 'calibrated' (Default & Recommended):
-                #   Zero-oracle calibrated router handling ambiguous and factual queries with internal consistency & factual grounding checks:
-                #   * Ambiguous consensus (pred_m == pred_u == u_idx): check if model internally contradicted itself by quoting facts.
-                #   * Factual consensus (pred_m == pred_u != u_idx): require evidence grounding directly in context text.
-                #   * Discrepant or unanchored queries -> Adaptive Tribunal.
-                # - 'ambig_only':
-                #   Fast Path is strictly reserved for questions where both passes agree that context is ambiguous (pred_m == pred_u == u_idx).
-                # - 'all_consistent':
-                #   Fast Path for any question where both passes agree (pred_m == pred_u in (0, 1, 2)).
+                # Consistency Gate with Over-refusal Guard (100% Zero-Oracle):
+                # 1. Consistent factual entity (pred_m == pred_u != undetermined): Safe for Fast Path.
+                # 2. Consistent undetermined (pred_m == pred_u == undetermined):
+                #    Detect internal contradiction (Fact-Anchor cited text evidence in unmasked CoT
+                #    despite arbiter choosing undetermined) -> Route to Tribunal to resolve.
+                #    Otherwise Safe for Fast Path.
                 u_idx = get_undetermined_index(all_results[i])
-                context = all_results[i].get("context", "")
-                fp_scope = getattr(args, "fast_path_scope", "calibrated")
 
-                if fp_scope == "calibrated":
-                    if pred_m == pred_u and pred_m in (0, 1, 2):
-                        if pred_m == u_idx:
-                            # Ambiguous consensus: check if model internally contradicted itself by quoting facts
-                            is_contradiction = is_evidence_grounded(resp_u, context)
-                            if is_contradiction:
-                                adapt_indices.append(i)
-                            else:
-                                fast_indices.append(i)
-                        else:
-                            # Factual consensus: require evidence grounding directly in context text
-                            grounded = is_evidence_grounded(resp_u, context)
-                            if grounded:
-                                fast_indices.append(i)
-                            else:
-                                adapt_indices.append(i)
-                    else:
-                        adapt_indices.append(i)
-                elif fp_scope == "ambig_only":
-                    if pred_m == pred_u and pred_m == u_idx:
-                        fast_indices.append(i)
-                    else:
-                        adapt_indices.append(i)
-                elif fp_scope == "all_consistent":
-                    if pred_m == pred_u and pred_m in (0, 1, 2):
-                        fast_indices.append(i)
-                    else:
-                        adapt_indices.append(i)
+                if pred_m == pred_u and pred_m in (0, 1, 2):
+                    is_over_refusal = False
+                    if pred_m == u_idx:
+                        # Zero-Oracle: check whether unmasked CoT extracted factual quotes or named actions
+                        resp_u_lower = resp_u.lower()
+                        has_fact_quote = any(kw in resp_u_lower for kw in [
+                            "explicitly states", "verbatim quote", "explicit facts",
+                            "fact-anchor: the text", "states that the", "according to the text",
+                            "evidence shows that", "the text directly names"
+                        ])
+                        is_over_refusal = has_fact_quote
 
-            print(f"\nDual-Pass Routing ({fp_scope}): {len(fast_indices)} ({len(fast_indices)/total_N*100:.1f}%) → Fast Path, {len(adapt_indices)} ({len(adapt_indices)/total_N*100:.1f}%) → Adaptive Tribunal Path (Debate Required)")
+                    if is_over_refusal:
+                        adapt_indices.append(i)
+                    else:
+                        fast_indices.append(i)
+                else:
+                    adapt_indices.append(i)
+
+            print(f"\nDual-Pass Routing: {len(fast_indices)} ({len(fast_indices)/total_N*100:.1f}%) → Fast Path (Consistent, Immune to Bias), {len(adapt_indices)} ({len(adapt_indices)/total_N*100:.1f}%) → Adaptive Tribunal Path (Discrepant/Over-refused, Needs Debate)")
             log_data(f"Dual-Pass Routing: {len(fast_indices)} Fast Path, {len(adapt_indices)} Adaptive Path", args)
 
             # ── Phase 2: Run Cross-Encoder ONCE only on Adaptive Path samples to extract bias types ──
@@ -1190,18 +1130,6 @@ def parse_arguments():
         "--fast_path_method", type=str, default="logical",
         choices=["direct", "logical", "logical_reprompting"],
         help="Prompting strategy for Fast Path: direct, logical (no reprompting), or logical_reprompting"
-    )
-
-    parser.add_argument(
-        "--fast_path_scope", type=str, default="calibrated",
-        choices=["calibrated", "ambig_only", "all_consistent"],
-        help=(
-            "Scope of Fast Path routing: 'calibrated' (default: high-scope adaptive routing where safe consensus "
-            "ambiguous (non-over-refused) AND grounded, non-stereotyped consensus factuals go to Fast Path (~55-62%); "
-            "risky/unanchored/discrepant/stereotyped go to Tribunal), "
-            "'ambig_only' (strictly ambiguous consensus P_M==P_U==undetermined only goes to Fast Path ~44%), or "
-            "'all_consistent' (naive P_M==P_U without safety checks ~81%)"
-        )
     )
 
     parser.add_argument(
