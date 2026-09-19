@@ -36,7 +36,7 @@ if [ "$MODE" = "dual_pass" ]; then
         --chat_templates \
         --output_json ./predictions/BBQ_dual_pass_results.json "${@:3}"
 
-elif [ "$MODE" = "pipeline" ]; then
+elif [ "$MODE" = "mpt" ] || [ "$MODE" = "inference" ] || [ "$MODE" = "pipeline" ]; then
     echo ">>> Executing Adaptive-MPT End-to-End Pipeline with 3-Persona Tribunal..."
     python mpt_inference.py \
         --method mpt \
