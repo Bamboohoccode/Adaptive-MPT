@@ -222,7 +222,11 @@ def mask_entities(item):
                 non_unknown.append(k)
         elif k in masked_item:
             val_lower = str(masked_item[k]).lower()
-            if not any(kw in val_lower for kw in ["cannot be determined", "can't be determined", "not enough", "undetermined", "not answerable", "unknown"]):
+            if not any(kw in val_lower for kw in [
+                "cannot be determined", "can't be determined",
+                "not enough", "undetermined", "not answerable",
+                "unknown", "not determinable", "cannot answer", "can't answer"
+            ]):
                 if k not in non_unknown:
                     non_unknown.append(k)
     
@@ -267,7 +271,7 @@ def get_undetermined_index(item):
         if any(kw in text for kw in [
             "cannot be determined", "can't be determined",
             "undetermined", "unknown", "not enough information",
-            "not answerable", "not determinable"
+            "not answerable", "not determinable", "cannot answer", "can't answer"
         ]):
             return idx
     return 2
@@ -554,7 +558,7 @@ def fast_path_inference(args, models, indices, method_name, all_results, turn1_c
     method = args.method
     router_method = getattr(args, "router_method", "context_sufficiency")
     if router_method == "context_sufficiency":
-        is_masked = True
+        is_masked = False  # Consistent samples output unmasked response directly
     else:
         is_masked = getattr(args, "mask_entities", "none") in ("fast_path", "both")
     warnings = "" if is_masked else (UNCERTAINTY_WARNING + DEBIAS_PROMPT)
@@ -577,26 +581,29 @@ def fast_path_inference(args, models, indices, method_name, all_results, turn1_c
         if responses:
             log_data(f"\n{'-'*30}\nFast Path response sample:\n{responses[0]}", args)
 
-    # ── Turn 2: Always apply logical reprompting (Double-check) ──
-    reprompt_prompts = []
-    fact_ext = getattr(args, "feature_extraction", False)
-    reprompt_text = REPROMPT_MASKED if is_masked else (REPROMPT_FACT_EXTRACTION if fact_ext else REPROMPT)
-    for j, i in enumerate(indices):
-        reprompt_prompt = format_prompt(
-            args, reprompt_text + POSTFIX_PROMPT,
-            sys_prompt=DEFAULT_SYS_PROMPT,
-            thinking_history=[[prompts_text[j], responses[j]]],
-            id=args.summary_id,
-        )
-        reprompt_prompts.append(reprompt_prompt)
+    # ── Turn 2: Reprompting (Double-check) only if fast_path_method == 'logical_reprompting' ──
+    if getattr(args, "fast_path_method", "logical") == "logical_reprompting":
+        reprompt_prompts = []
+        fact_ext = getattr(args, "feature_extraction", False)
+        reprompt_text = REPROMPT_MASKED if is_masked else (REPROMPT_FACT_EXTRACTION if fact_ext else REPROMPT)
+        for j, i in enumerate(indices):
+            reprompt_prompt = format_prompt(
+                args, reprompt_text + POSTFIX_PROMPT,
+                sys_prompt=DEFAULT_SYS_PROMPT,
+                thinking_history=[[prompts_text[j], responses[j]]],
+                id=args.summary_id,
+            )
+            reprompt_prompts.append(reprompt_prompt)
 
-    log_data(f"\n{'='*30}\nFast Path Turn 2 Reprompting ({len(reprompt_prompts)} samples, masked={is_masked}):", args)
-    resp2 = decode_batch(models, args, reprompt_prompts, phase="fast_path_turn2")
-    for j in range(len(indices)):
-        if j < len(resp2) and resp2[j]:
-            responses[j] = resp2[j]
-    if responses:
-        log_data(f"\n{'-'*30}\nFast Path Turn 2 response sample:\n{responses[0]}", args)
+        log_data(f"\n{'='*30}\nFast Path Turn 2 Reprompting ({len(reprompt_prompts)} samples, masked={is_masked}):", args)
+        resp2 = decode_batch(models, args, reprompt_prompts, phase="fast_path_turn2")
+        for j in range(len(indices)):
+            if j < len(resp2) and resp2[j]:
+                responses[j] = resp2[j]
+        if responses:
+            log_data(f"\n{'-'*30}\nFast Path Turn 2 response sample:\n{responses[0]}", args)
+    else:
+        log_data(f"\nFast Path skipping Turn 2 reprompting (method={getattr(args, 'fast_path_method', 'logical')}) to preserve Turn 1 accuracy and avoid Self-Correction Paradox.", args)
 
     for j, i in enumerate(indices):
         pred = get_pred(responses[j])
@@ -777,36 +784,54 @@ def batch_inference(args, models, method_name):
         routes = None
 
         if router_method == "context_sufficiency":
-            # ── Phase 1: Pure LLM Context Sufficiency Reasoning on Masked Context ──
-            print(f"\n--- Phase 1: Context Sufficiency Routing (Masked Turn 1) ---")
-            log_data(f"\n--- Phase 1: Context Sufficiency Routing (Masked Turn 1) ---", args)
+            # ── Phase 1: Dual-Pass Counterfactual Batch Inference (Masked & Unmasked 2N Batch) ──
+            print(f"\n--- Phase 1: Dual-Pass Counterfactual Routing (Masked & Unmasked Turn 1) ---")
+            log_data(f"\n--- Phase 1: Dual-Pass Counterfactual Routing (Masked & Unmasked Turn 1) ---", args)
 
             masked_items = [mask_entities(it) for it in all_results]
-            turn1_prompts = []
-            turn1_prompts_text = []
+            turn1_prompts_m = []
+            turn1_prompts_u = []
+            turn1_texts_m = []
+            turn1_texts_u = []
 
-            for it in masked_items:
-                prompt_text = get_prompt(args, it, method, warnings="", logical=True, masked=True)
-                turn1_prompts_text.append(prompt_text)
-                turn1_prompts.append(format_prompt(args, prompt_text, sys_prompt=DEFAULT_SYS_PROMPT, id=args.summary_id))
+            for it_m, it_u in zip(masked_items, all_results):
+                # Pass 1: Masked with LOGICAL_PROMPT_MASKED
+                p_text_m = get_prompt(args, it_m, method, warnings="", logical=True, masked=True)
+                turn1_texts_m.append(p_text_m)
+                turn1_prompts_m.append(format_prompt(args, p_text_m, sys_prompt=DEFAULT_SYS_PROMPT, id=args.summary_id))
 
-            turn1_responses = decode_batch(models, args, turn1_prompts, phase="routing")
+                # Pass 2: Unmasked with LOGICAL_PROMPT_ASYMMETRIC_UNMASKED (or LOGICAL_PROMPT)
+                p_text_u = get_prompt(args, it_u, method, warnings="", logical=True, masked=False)
+                turn1_texts_u.append(p_text_u)
+                turn1_prompts_u.append(format_prompt(args, p_text_u, sys_prompt=DEFAULT_SYS_PROMPT, id=args.summary_id))
+
+            # Batch decode all 2N prompts in single unified batch for maximum GPU throughput
+            all_turn1_prompts = turn1_prompts_m + turn1_prompts_u
+            all_turn1_responses = decode_batch(models, args, all_turn1_prompts, phase="dual_pass_routing")
+            turn1_responses_m = all_turn1_responses[:total_N]
+            turn1_responses_u = all_turn1_responses[total_N:]
+
             turn1_cache = {}
             fast_indices = []
             adapt_indices = []
 
             for i in range(total_N):
-                resp = turn1_responses[i] if i < len(turn1_responses) else ""
-                turn1_cache[i] = (turn1_prompts_text[i], resp)
-                pred = get_pred(resp)
+                resp_m = turn1_responses_m[i] if i < len(turn1_responses_m) else ""
+                resp_u = turn1_responses_u[i] if i < len(turn1_responses_u) else ""
+                pred_m = get_pred(resp_m)
+                pred_u = get_pred(resp_u)
 
-                if is_classified_as_ambiguous(pred, all_results[i]):
+                # Store the unmasked response in turn1_cache for Fast Path direct output
+                turn1_cache[i] = (turn1_texts_u[i], resp_u)
+
+                # Consistency Gate: if pred_m == pred_u and valid, model is invariant to demographic bias
+                if pred_m == pred_u and pred_m in (0, 1, 2):
                     fast_indices.append(i)
                 else:
                     adapt_indices.append(i)
 
-            print(f"\nRouting: {len(fast_indices)} → Fast Path (Insufficient Context, Masked), {len(adapt_indices)} → Adaptive Path (Sufficient Context, Unmasked)")
-            log_data(f"Routing: {len(fast_indices)} Fast Path, {len(adapt_indices)} Adaptive Path", args)
+            print(f"\nDual-Pass Routing: {len(fast_indices)} ({len(fast_indices)/total_N*100:.1f}%) → Fast Path (Consistent, Immune to Bias), {len(adapt_indices)} ({len(adapt_indices)/total_N*100:.1f}%) → Adaptive Tribunal Path (Discrepant, Needs Debate)")
+            log_data(f"Dual-Pass Routing: {len(fast_indices)} Fast Path, {len(adapt_indices)} Adaptive Path", args)
 
             # ── Phase 2: Run Cross-Encoder ONCE only on Adaptive Path samples to extract bias types ──
             if adapt_indices and not args.disable_cross_encoder and hasattr(args, "_router") and args._router is not None:
@@ -930,7 +955,7 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "--num_rounds", type=int, default=3,
+        "--num_rounds", type=int, default=2,
         help="Number of rounds"
     )
 
@@ -940,7 +965,7 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "--temperature", type=float, default=1.0,
+        "--temperature", type=float, default=0.0,
         help="Temperature used to generate responses"
     )
 
@@ -950,7 +975,7 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "--max_tokens", type=int, default=512,
+        "--max_tokens", type=int, default=768,
         help="The maximum number of tokens the model output"
     )
 
@@ -1040,9 +1065,9 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "--fast_path_method", type=str, default="logical_reprompting",
+        "--fast_path_method", type=str, default="logical",
         choices=["direct", "logical", "logical_reprompting"],
-        help="Prompting strategy for Fast Path: direct, logical, or logical_reprompting"
+        help="Prompting strategy for Fast Path: direct, logical (no reprompting), or logical_reprompting"
     )
 
     parser.add_argument(
