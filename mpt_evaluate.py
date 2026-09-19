@@ -336,6 +336,24 @@ def main():
     output_dir = Path("results") / args.dataset / models_str / args.note
     output_dir.mkdir(parents=True, exist_ok=True)
     method_name = f"{args.method}_{args.num_rounds}_{args.max_tokens}"
+
+    # Auto-detect method_name if not found in prediction files
+    detected_method = None
+    for path in args.results_paths:
+        if path.exists():
+            first_line = next(load_jsonl(path), None)
+            if first_line:
+                if method_name in first_line:
+                    detected_method = method_name
+                    break
+                candidates = [k for k in first_line.keys() if k.startswith(f"{args.method}_") or k == args.method]
+                if candidates:
+                    detected_method = candidates[-1]
+                    break
+    if detected_method and detected_method != method_name:
+        print(f"Notice: Configured method '{method_name}' not found, but detected '{detected_method}' in predictions. Auto-evaluating '{detected_method}'.")
+        method_name = detected_method
+
     output_file = output_dir / f"rsts_{method_name}.csv"
 
     for path in args.results_paths:
@@ -358,9 +376,15 @@ def main():
             all_records += list(load_jsonl(path))
     if all_records:
         df_all = pd.DataFrame(all_records)
-        mets = compute_metrics(df_all, method_name, dataset)
-        mets['category'] = "Total"
-        summary.append(mets)
+        if method_name in df_all.columns:
+            mets = compute_metrics(df_all, method_name, dataset)
+            mets['category'] = "Total"
+            summary.append(mets)
+
+    if not summary:
+        print(f"\nError: No valid prediction columns found for method '{method_name}'.")
+        print("Please check available methods in your prediction files or specify --num_rounds and --max_tokens.")
+        return
 
     summary = process_stereoset(summary, dataset)
 
@@ -434,7 +458,7 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "--num_rounds", type=int, default=3,
+        "--num_rounds", type=int, default=2,
         help="Number of rounds"
     )
 
@@ -454,7 +478,7 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "--max_tokens", type=int, default=512,
+        "--max_tokens", type=int, default=768,
         help="The maximum number of tokens the model output"
     )
 

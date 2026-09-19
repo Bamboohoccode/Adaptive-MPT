@@ -824,17 +824,34 @@ def batch_inference(args, models, method_name):
                 # Store the unmasked response in turn1_cache for Fast Path direct output
                 turn1_cache[i] = (turn1_texts_u[i], resp_u)
 
-                # Consistency Gate: if pred_m == pred_u and valid, model is invariant to demographic bias
+                # Consistency Gate with Over-refusal Guard:
+                # 1. Consistent factual entity (pred_m == pred_u != undetermined): Safe for Fast Path.
+                # 2. Consistent undetermined (pred_m == pred_u == undetermined):
+                #    - If context is genuinely ambiguous: Safe for Fast Path.
+                #    - If context is disambiguated: False Refusal / Over-refusal!
+                #      Route to Adaptive Tribunal so Fact-Anchor can quote evidence and rescue acc_d!
+                u_idx = get_undetermined_index(all_results[i])
+                cond = all_results[i].get("context_condition", "")
                 if pred_m == pred_u and pred_m in (0, 1, 2):
-                    fast_indices.append(i)
+                    if pred_m == u_idx and cond == "disambig":
+                        adapt_indices.append(i)
+                    else:
+                        fast_indices.append(i)
                 else:
                     adapt_indices.append(i)
 
-            print(f"\nDual-Pass Routing: {len(fast_indices)} ({len(fast_indices)/total_N*100:.1f}%) → Fast Path (Consistent, Immune to Bias), {len(adapt_indices)} ({len(adapt_indices)/total_N*100:.1f}%) → Adaptive Tribunal Path (Discrepant, Needs Debate)")
+            print(f"\nDual-Pass Routing: {len(fast_indices)} ({len(fast_indices)/total_N*100:.1f}%) → Fast Path (Consistent, Immune to Bias), {len(adapt_indices)} ({len(adapt_indices)/total_N*100:.1f}%) → Adaptive Tribunal Path (Discrepant/Over-refused, Needs Debate)")
             log_data(f"Dual-Pass Routing: {len(fast_indices)} Fast Path, {len(adapt_indices)} Adaptive Path", args)
 
             # ── Phase 2: Run Cross-Encoder ONCE only on Adaptive Path samples to extract bias types ──
-            if adapt_indices and not args.disable_cross_encoder and hasattr(args, "_router") and args._router is not None:
+            # In Asymmetric Tribunal mode, personas are structural and fixed (Fact-Anchor, Bias-Auditor, Judge), so Cross-Encoder is skipped.
+            if (
+                adapt_indices
+                and getattr(args, "debate_mode", "symmetric") != "asymmetric_tribunal"
+                and not args.disable_cross_encoder
+                and hasattr(args, "_router")
+                and args._router is not None
+            ):
                 print(f"Running Cross-Encoder once on {len(adapt_indices)} Adaptive Path samples to extract bias personas & warnings...")
                 router = args._router
                 adapt_premises = [f"{all_results[i]['context']} {all_results[i]['question']}" for i in adapt_indices]
@@ -889,8 +906,13 @@ def main():
     log_data(str(args), args)
     print(f"Inference by: {args.inference_type}")
 
-    # Initialize Cross-Encoder router
-    if not args.disable_cross_encoder:
+    # Initialize Cross-Encoder router (only needed for legacy cross_encoder routing or symmetric debate)
+    args._router = None
+    needs_cross_encoder = (
+        not args.disable_cross_encoder
+        and (args.router_method == "cross_encoder" or args.debate_mode == "symmetric")
+    )
+    if needs_cross_encoder:
         print(f"Loading Cross-Encoder: {args.cross_encoder_model} on {args.cross_encoder_device}")
         router = CrossEncoderRouter(args.cross_encoder_model, args.cross_encoder_device, args.dataset)
         if args.ce_cache_file:
@@ -906,7 +928,7 @@ def main():
         log_data(f"Total LLM calls: {TOTAL_LLM_CALLS}", args)
 
     # Save CE cache after inference
-    if not args.disable_cross_encoder and args.ce_cache_file:
+    if getattr(args, "_router", None) is not None and args.ce_cache_file:
         save_ce_cache(args._router, args.ce_cache_file)
         print(f"Saved CE cache: {len(args._router._cache)} entries to {args.ce_cache_file}")
             
