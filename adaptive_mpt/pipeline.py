@@ -5,20 +5,15 @@ from adaptive_mpt.prompts import (
     QUESTION_PROMPT_STEREOSET,
     CONSTRAINT_PROMPT_BBQ,
     CONSTRAINT_PROMPT_STS,
-    DEBIAS_PROMPT,
-    UNCERTAINTY_WARNING,
     POSTFIX_PROMPT,
-    LOGICAL_PROMPT,
-    REPROMPT,
     LOGICAL_PROMPT_MASKED,
-    REPROMPT_MASKED,
-    REVIEW_PROMPT_MASKED,
-    SUMMARY_PROMPT_MASKED,
-    LOGICAL_PROMPT_FACT_EXTRACTION,
-    REPROMPT_FACT_EXTRACTION,
-    REVIEW_PROMPT_FACT_EXTRACTION,
-    SUMMARY_PROMPT_FACT_EXTRACTION,
     LOGICAL_PROMPT_ASYMMETRIC_UNMASKED,
+    REPROMPT,
+    REPROMPT_MASKED,
+    REVIEW_PROMPT,
+    REVIEW_PROMPT_MASKED,
+    SUMMARY_PROMPT,
+    SUMMARY_PROMPT_MASKED,
     FACT_ANCHOR_SYS_PROMPT,
     BIAS_AUDITOR_SYS_PROMPT,
     JUDGE_PERSONA_SYS_PROMPT,
@@ -38,26 +33,17 @@ def build_prompt(args, input_example, is_init=True, warnings="", logical=False, 
     elif dataset == "stereoset":
         ask_prompt = CONSTRAINT_PROMPT_STS.format(question_prompt=QUESTION_PROMPT_STEREOSET, context=context, question=question, options=options)
 
-    fact_ext = getattr(args, "feature_extraction", False)
-    debate_mode = getattr(args, "debate_mode", "symmetric")
-
     if is_reprompt:
-        prompt = REPROMPT_MASKED if masked else (REPROMPT_FACT_EXTRACTION if fact_ext else REPROMPT)
+        prompt = REPROMPT_MASKED if masked else REPROMPT
     elif is_init:
-        prompt = ask_prompt if masked else (ask_prompt + warnings)
-        if logical or masked:
-            if masked:
-                prompt += LOGICAL_PROMPT_MASKED
-            elif debate_mode == "asymmetric_tribunal":
-                prompt += LOGICAL_PROMPT_ASYMMETRIC_UNMASKED
-            elif fact_ext:
-                prompt += LOGICAL_PROMPT_FACT_EXTRACTION
-            else:
-                prompt += LOGICAL_PROMPT
+        if masked:
+            prompt = ask_prompt + LOGICAL_PROMPT_MASKED
+        else:
+            prompt = ask_prompt + LOGICAL_PROMPT_ASYMMETRIC_UNMASKED
     elif is_summary:
-        prompt = SUMMARY_PROMPT_MASKED if masked else (SUMMARY_PROMPT_FACT_EXTRACTION if fact_ext else SUMMARY_PROMPT)
+        prompt = SUMMARY_PROMPT_MASKED if masked else SUMMARY_PROMPT
     else:
-        prompt = REVIEW_PROMPT_MASKED if masked else (REVIEW_PROMPT_FACT_EXTRACTION if fact_ext else REVIEW_PROMPT)
+        prompt = REVIEW_PROMPT_MASKED if masked else REVIEW_PROMPT
 
     if args.inference_type == "openai":
         prompt += "Restrict your response to two sentences. "
@@ -109,7 +95,13 @@ def run_dual_pass_screening(args, models, sample_records):
     return p_masked, p_unmasked, cot_unmasked, fast_path_cache
 
 def route_samples(args, sample_records, p_masked, p_unmasked, cot_unmasked):
-    """Component 2: Zero-Oracle Consistency Gate with Over-refusal Guard."""
+    """Component 2: Zero-Oracle Consistency Gate with Over-refusal Guard.
+    
+    Routing method is strictly context_sufficiency:
+    - P_M == P_U != u_idx -> Fast Path
+    - P_M == P_U == u_idx -> Check over-refusal via factual quote keywords
+    - P_M != P_U          -> Asymmetric Tribunal
+    """
     total_samples = len(sample_records)
     fast_path_indices = []
     tribunal_indices = []
@@ -147,7 +139,7 @@ def execute_fast_path(args, models, fast_path_indices, sample_records, fast_path
     if not fast_path_indices:
         return
 
-    print(f"\n--- Fast Path ({args.fast_path_method}, {len(fast_path_indices)} samples) ---")
+    print(f"\n--- Fast Path ({len(fast_path_indices)} samples) ---")
     for i in fast_path_indices:
         _, response = fast_path_cache[i]
         pred = get_pred(response)
@@ -220,7 +212,7 @@ def execute_asymmetric_tribunal(args, models, tribunal_indices, sample_records, 
             args, prompt,
             sys_prompt=judge_system_prompt,
             thinking_history=tribunal_transcript[j],
-            id=args.summary_id,
+            id=0,
         ))
 
     judge_verdicts = decode_batch(models, args, judge_synthesis_prompts, phase="tribunal_judge_summary")

@@ -7,7 +7,7 @@
 
 Adaptive-MPT is an efficient, debiasing multi-agent reasoning framework designed to overcome the **Cowardly Consensus (Over-refusal)** trap in Large Language Models without sacrificing factual accuracy ($acc_d$).
 
-By decoupling factual consistency from demographic identity via a **Zero-Oracle Dual-Pass Screening** and dispatching discrepant cases to an **Asymmetric Persona Tribunal**, Adaptive-MPT achieves high factual fidelity, eliminates demographic bias, and routes ~80.9% of benign queries through a **0-compute Fast Path**.
+By decoupling factual consistency from demographic identity via a **Zero-Oracle Dual-Pass Screening** (fixed to `context_sufficiency`) and dispatching discrepant cases to an **Asymmetric Persona Tribunal**, Adaptive-MPT achieves high factual fidelity, eliminates demographic bias, and routes ~80.9% of benign queries through a **0-compute Fast Path**.
 
 ---
 
@@ -72,29 +72,24 @@ flowchart TD
 
 ```
 multi-persona-thinking/
-├── adaptive_mpt/                       # Core Adaptive-MPT modular library
+├── adaptive_mpt/                       # Core Adaptive-MPT modular package
 │   ├── __init__.py                     # Clean package exports
 │   ├── prompts.py                      # Standardized paper prompt templates
 │   ├── data.py                         # Dataset loading, 4-sample grouping, entity masking
-│   ├── models.py                       # vLLM / Transformers LLM decoder engine (zero mock)
+│   ├── models.py                       # vLLM / Transformers LLM decoder engine
 │   └── pipeline.py                     # Dual-Pass Screener, Consistency Gate, Tribunal
 │
-├── run_inference.py                    # Primary modern CLI entry point (~120 lines)
-├── mpt_inference.py                    # 100% backward-compatible CLI wrapper for legacy scripts
+├── mpt_inference.py                    # Primary inference CLI script
 ├── mpt_evaluate.py                     # Official benchmark evaluation script
-├── check_dual_pass.py                  # Diagnostic screening tool
-├── cross_encoder.py                    # Optional semantic NLI router
-├── adaptive_mpt_flowchart.drawio       # Editable visual flowchart (Draw.io)
+├── adaptive_mpt_flowchart.drawio       # Visual pipeline flowchart (Draw.io)
 ├── data/                               # Benchmark datasets (BBQ: 11 categories, StereoSet)
-├── scripts/                            # Automation shell scripts
-└── requirements.txt                    # Environment dependencies
+├── scripts/                            # Automation shell scripts (run.sh)
+└── requirements.txt                    # Python dependencies
 ```
 
 ---
 
 ## ⚙️ Installation
-
-### 1. Python Environment
 
 ```bash
 # Recommended: Python 3.10, 3.11, or 3.12
@@ -103,11 +98,6 @@ conda activate adaptive_mpt
 
 # Install dependencies
 pip install -r requirements.txt
-```
-
-### 2. Required Packages
-Ensure `vllm`, `transformers`, `torch`, `xopen`, and `pandas` are installed:
-```bash
 pip install vllm transformers torch xopen pandas tqdm
 ```
 
@@ -115,13 +105,12 @@ pip install vllm transformers torch xopen pandas tqdm
 
 ## 🚀 How to Run
 
-### 1. Modern Execution (`run_inference.py`)
+### 1. Main Inference (`mpt_inference.py`)
 
 Run the full Adaptive-MPT pipeline on BBQ (880 samples with standard `--truncate`):
 
 ```bash
-python run_inference.py \
-    --method mpt \
+python mpt_inference.py \
     --models meta-llama/Llama-3.1-8B-Instruct \
     --dataset BBQ \
     --num_gpus 2 \
@@ -130,29 +119,26 @@ python run_inference.py \
     --chat_templates
 ```
 
-### 2. Kaggle / Backward-Compatible Command (`mpt_inference.py`)
+### 2. Kaggle Execution
 
-If running inside a Kaggle notebook or using existing automation scripts:
+If running inside a Kaggle notebook:
 
 ```bash
 %cd /kaggle/working/Adaptive-MPT/multi-persona-thinking
 
 # 2x T4 GPUs (or 1x P100 / A100: set --num_gpus 1)
 !python mpt_inference.py \
-    --method mpt \
     --models meta-llama/Llama-3.1-8B-Instruct \
     --dataset BBQ \
     --num_gpus 2 \
-    --router_method context_sufficiency \
-    --fast_path_method logical \
     --truncate \
     --random_seed 42 \
     --chat_templates
 ```
 
-### 3. Running Evaluation (`mpt_evaluate.py`)
+### 3. Benchmark Evaluation (`mpt_evaluate.py`)
 
-To compute accuracy ($acc_{amb}, acc_{disamb}, acc_{avg}$) and bias discrepancy ($\Delta bias_{amb}, \Delta bias_{disamb}$):
+Compute accuracy ($acc_{amb}, acc_{disamb}, acc_{avg}$) and bias discrepancy ($\Delta bias_{amb}, \Delta bias_{disamb}$):
 
 ```bash
 python mpt_evaluate.py \
@@ -161,20 +147,6 @@ python mpt_evaluate.py \
     --dataset BBQ \
     --note 1 \
     --truncate
-```
-
-### 4. Fast Diagnostic Check (`check_dual_pass.py`)
-
-To evaluate only the Dual-Pass consistency rate and Fast Path eligibility without running debate rounds:
-
-```bash
-python check_dual_pass.py \
-    --models meta-llama/Llama-3.1-8B-Instruct \
-    --dataset BBQ \
-    --num_gpus 2 \
-    --truncate \
-    --random_seed 42 \
-    --chat_templates
 ```
 
 ---
@@ -192,7 +164,7 @@ python check_dual_pass.py \
 
 ---
 
-## 🛠️ Key CLI Arguments Reference
+## 🛠️ Active CLI Arguments Reference
 
 | Argument | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
@@ -201,13 +173,13 @@ python check_dual_pass.py \
 | `--num_gpus` | int | `2` | Tensor parallel size for vLLM |
 | `--truncate` | flag | `False` | Sample 880 standard evaluation subset on BBQ |
 | `--random_seed` | int | `0` | RNG seed for deterministic sample selection |
-| `--router_method`| str | `context_sufficiency` | `context_sufficiency` (Dual-Pass) or `cross_encoder` |
-| `--fast_path_method`| str | `logical` | Fast path strategy (`direct`, `logical`, `logical_reprompting`) |
-| `--debate_mode` | str | `asymmetric_tribunal` | Debate architecture: `asymmetric_tribunal` or `symmetric` |
 | `--chat_templates` | flag | `False` | Apply model's official tokenizer chat template |
 | `--temperature` | float | `0.0` | Sampling temperature (`0.0` = deterministic greedy) |
+| `--max_tokens` | int | `768` | Maximum tokens to generate |
+| `--num_rounds` | int | `2` | Number of Tribunal debate rounds |
 | `--note` | str | `1` | Subfolder name under `predictions/` |
 | `--overwrite` | flag | `False` | Overwrite existing prediction JSONL files |
+| `--router_method`| str | `context_sufficiency` | Fixed to `context_sufficiency` (Dual-Pass) |
 
 ---
 
