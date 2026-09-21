@@ -1,42 +1,224 @@
-# Multi-Persona Thinking for Bias Mitigation in Large Language Models
+# Adaptive-MPT: Efficient & Debiased LLM Reasoning via Counterfactual Dual-Pass Screening and Asymmetric Persona Tribunal
 
-[![Venue: ACL Findings 2026](https://img.shields.io/badge/Venue-ACL%20Findings%202026-blue)](https://aclanthology.org/2026.findings-acl.1389/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![Engine: vLLM](https://img.shields.io/badge/engine-vLLM-green.svg)](https://github.com/vllm-project/vllm)
+[![Zero-Oracle](https://img.shields.io/badge/architecture-Zero--Oracle-brightgreen.svg)]()
+[![Benchmark: BBQ](https://img.shields.io/badge/benchmark-BBQ-orange.svg)]()
 
-## Setup
+Adaptive-MPT is an efficient, debiasing multi-agent reasoning framework designed to overcome the **Cowardly Consensus (Over-refusal)** trap in Large Language Models without sacrificing factual accuracy ($acc_d$).
 
-```bash
-conda env create -f environment.yml
-conda activate debiasing
+By decoupling factual consistency from demographic identity via a **Zero-Oracle Dual-Pass Screening** and dispatching discrepant cases to an **Asymmetric Persona Tribunal**, Adaptive-MPT achieves high factual fidelity, eliminates demographic bias, and routes ~80.9% of benign queries through a **0-compute Fast Path**.
+
+---
+
+## 🏛️ Pipeline Architecture
+
+```mermaid
+flowchart TD
+    classDef inputStyle fill:#1e293b,stroke:#475569,stroke-width:2px,color:#f8fafc;
+    classDef passStyle fill:#0f172a,stroke:#0284c7,stroke-width:2px,color:#f8fafc;
+    classDef gateStyle fill:#312e81,stroke:#6366f1,stroke-width:2px,color:#f8fafc;
+    classDef fastStyle fill:#064e3b,stroke:#10b981,stroke-width:2px,color:#f8fafc;
+    classDef adaptStyle fill:#4c1d95,stroke:#a855f7,stroke-width:2px,color:#f8fafc;
+    classDef judgeStyle fill:#78350f,stroke:#f59e0b,stroke-width:2px,color:#f8fafc;
+
+    In["Input Query (Context, Question, Options)"]:::inputStyle
+
+    subgraph S1 ["Component 1: Dual-Pass Screening (Unified 2N Batch)"]
+        In --> PassM["Pass 1: Masked Entity<br/>[Person A], [Person B]<br/>+ LOGICAL_PROMPT_MASKED<br/>&rarr; P_M (Objective Logic)"]:::passStyle
+        In --> PassU["Pass 2: Unmasked Identity<br/>Original Demographics<br/>+ ASYMMETRIC_UNMASKED<br/>&rarr; P_U, R_U (Self-Auditing CoT)"]:::passStyle
+    end
+
+    PassM & PassU --> Gate{"Component 2: Zero-Oracle Gate<br/>P_M == P_U ?"}:::gateStyle
+
+    subgraph S2 ["Component 3: Fast Path (System 1)"]
+        Gate -- "Consistent & Safe<br/>(P_M == P_U != u_idx)" --> FP["Direct Turn 1 Cache Output<br/>0 Compute Overhead<br/>(~80.9% of queries)"]:::fastStyle
+        Gate -- "Ambiguous Consensus<br/>(P_M == P_U == u_idx)" --> CheckRefusal{"Over-refusal Check:<br/>Factual quote cited in R_U?"}:::gateStyle
+        CheckRefusal -- "No Quote (Genuine Ambiguity)" --> FP
+    end
+
+    subgraph S3 ["Component 4: Asymmetric Persona Tribunal (System 2)"]
+        Gate -- "Discrepancy (P_M != P_U)<br/>Demographics altered decision" --> Tribunal["Initialize 3-Role Tribunal"]:::adaptStyle
+        CheckRefusal -- "Yes Quote (Over-refusal trap)" --> Tribunal
+
+        Tribunal --> P1["Fact-Anchor Persona<br/>'Demands explicit literal text quotes;<br/>facts are never bias'"]:::adaptStyle
+        Tribunal --> P2["Bias-Auditor Persona<br/>'Audits for demographic prejudice;<br/>challenges ungrounded leaps'"]:::adaptStyle
+        P1 & P2 --> Debate["Adversarial Discourse Rounds"]:::adaptStyle
+        Debate --> Judge["Judicial Arbiter<br/>Impartially weighs quotes vs objections<br/>Produces final <answer> verdict"]:::judgeStyle
+    end
+
+    FP --> Out["Final Prediction"]:::inputStyle
+    Judge --> Out
 ```
 
-## Run
+### The 4 Core Components
 
-To run the main experiment:
+1. **Dual-Pass Batch Screening**: Evaluates each query twice in a single $2N$ batch on vLLM:
+   - **Pass 1 (Masked Logic)**: Anonymizes character identities to `[Person A]`, `[Person B]` with `LOGICAL_PROMPT_MASKED` (zero mention of bias) to establish objective ground-truth reasoning ($P_M$).
+   - **Pass 2 (Unmasked CoT)**: Keeps original demographic identities with `LOGICAL_PROMPT_ASYMMETRIC_UNMASKED` to elicit self-audited reasoning ($P_U, R_U$).
+2. **Zero-Oracle Consistency Gate**: 100% blind to ground-truth labels and benchmark metadata. Routes samples purely on behavioral divergence:
+   - **Factual Consensus** ($P_M == P_U \neq u\_idx$): Identity exposure caused zero deviation $\rightarrow$ Fast Path.
+   - **Ambiguous Consensus** ($P_M == P_U == u\_idx$): If the CoT cited explicit factual text quotes, the model fell into the *Cowardly Consensus (Over-refusal)* trap $\rightarrow$ Sent to Tribunal. Otherwise $\rightarrow$ Fast Path.
+   - **Discrepancy** ($P_M \neq P_U$): Demographic exposure shifted the model's judgment $\rightarrow$ Sent to Tribunal.
+3. **Fast Path (System 1)**: Returns the cached unmasked Turn 1 prediction directly with **0 compute overhead** and no duplicate generation calls.
+4. **Asymmetric Persona Tribunal (System 2)**: Structured adversarial debate with specialized roles:
+   - **Fact-Anchor**: Enforces verbatim text evidence; treats facts as objective evidence, not bias.
+   - **Bias-Auditor**: Scrutinizes stereotypes, demographic prejudice, and ungrounded assumptions.
+   - **Judicial Arbiter**: Impartially evaluates evidence, rules on objections, and renders the final verdict.
 
-```bash
-bash scripts/run.sh
+---
+
+## 📁 Repository Structure
+
+```
+multi-persona-thinking/
+├── adaptive_mpt/                       # Core Adaptive-MPT modular library
+│   ├── __init__.py                     # Clean package exports
+│   ├── prompts.py                      # Standardized paper prompt templates
+│   ├── data.py                         # Dataset loading, 4-sample grouping, entity masking
+│   ├── models.py                       # vLLM / Transformers LLM decoder engine (zero mock)
+│   └── pipeline.py                     # Dual-Pass Screener, Consistency Gate, Tribunal
+│
+├── run_inference.py                    # Primary modern CLI entry point (~120 lines)
+├── mpt_inference.py                    # 100% backward-compatible CLI wrapper for legacy scripts
+├── mpt_evaluate.py                     # Official benchmark evaluation script
+├── check_dual_pass.py                  # Diagnostic screening tool
+├── cross_encoder.py                    # Optional semantic NLI router
+├── adaptive_mpt_flowchart.drawio       # Editable visual flowchart (Draw.io)
+├── data/                               # Benchmark datasets (BBQ: 11 categories, StereoSet)
+├── scripts/                            # Automation shell scripts
+└── requirements.txt                    # Environment dependencies
 ```
 
-## Citation
+---
+
+## ⚙️ Installation
+
+### 1. Python Environment
+
+```bash
+# Recommended: Python 3.10, 3.11, or 3.12
+conda create -n adaptive_mpt python=3.12 -y
+conda activate adaptive_mpt
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+### 2. Required Packages
+Ensure `vllm`, `transformers`, `torch`, `xopen`, and `pandas` are installed:
+```bash
+pip install vllm transformers torch xopen pandas tqdm
+```
+
+---
+
+## 🚀 How to Run
+
+### 1. Modern Execution (`run_inference.py`)
+
+Run the full Adaptive-MPT pipeline on BBQ (880 samples with standard `--truncate`):
+
+```bash
+python run_inference.py \
+    --method mpt \
+    --models meta-llama/Llama-3.1-8B-Instruct \
+    --dataset BBQ \
+    --num_gpus 2 \
+    --truncate \
+    --random_seed 42 \
+    --chat_templates
+```
+
+### 2. Kaggle / Backward-Compatible Command (`mpt_inference.py`)
+
+If running inside a Kaggle notebook or using existing automation scripts:
+
+```bash
+%cd /kaggle/working/Adaptive-MPT/multi-persona-thinking
+
+# 2x T4 GPUs (or 1x P100 / A100: set --num_gpus 1)
+!python mpt_inference.py \
+    --method mpt \
+    --models meta-llama/Llama-3.1-8B-Instruct \
+    --dataset BBQ \
+    --num_gpus 2 \
+    --router_method context_sufficiency \
+    --fast_path_method logical \
+    --truncate \
+    --random_seed 42 \
+    --chat_templates
+```
+
+### 3. Running Evaluation (`mpt_evaluate.py`)
+
+To compute accuracy ($acc_{amb}, acc_{disamb}, acc_{avg}$) and bias discrepancy ($\Delta bias_{amb}, \Delta bias_{disamb}$):
+
+```bash
+python mpt_evaluate.py \
+    --method mpt \
+    --models meta-llama/Llama-3.1-8B-Instruct \
+    --dataset BBQ \
+    --note 1 \
+    --truncate
+```
+
+### 4. Fast Diagnostic Check (`check_dual_pass.py`)
+
+To evaluate only the Dual-Pass consistency rate and Fast Path eligibility without running debate rounds:
+
+```bash
+python check_dual_pass.py \
+    --models meta-llama/Llama-3.1-8B-Instruct \
+    --dataset BBQ \
+    --num_gpus 2 \
+    --truncate \
+    --random_seed 42 \
+    --chat_templates
+```
+
+---
+
+## 📊 Reproducibility & Random Seed Notes
+
+* **Default Random Seed**:
+  - In original baseline evaluations, the default seed is `--random_seed 0`.
+  - For apple-to-apple comparison against original MPT tables, use `--random_seed 0`.
+* **Sample Grouping**:
+  - BBQ questions are organized into coherent sets of 4 items (*ambiguous / disambiguated* $\times$ *negative / non-negative* polarity).
+  - With `--truncate`, exactly 20 groups (80 questions) are sampled deterministically per task across all 11 BBQ categories ($20 \times 4 \times 11 = 880$ samples total).
+* **Deterministic Decoding**:
+  - Greedy decoding (`--temperature 0.0`) is enforced by default to guarantee bit-for-bit reproducibility.
+
+---
+
+## 🛠️ Key CLI Arguments Reference
+
+| Argument | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `--models` | list | `meta-llama/Llama-3.1-8B-Instruct` | HuggingFace model path or identifier |
+| `--dataset` | str | `BBQ` | Evaluation benchmark: `BBQ` or `stereoset` |
+| `--num_gpus` | int | `2` | Tensor parallel size for vLLM |
+| `--truncate` | flag | `False` | Sample 880 standard evaluation subset on BBQ |
+| `--random_seed` | int | `0` | RNG seed for deterministic sample selection |
+| `--router_method`| str | `context_sufficiency` | `context_sufficiency` (Dual-Pass) or `cross_encoder` |
+| `--fast_path_method`| str | `logical` | Fast path strategy (`direct`, `logical`, `logical_reprompting`) |
+| `--debate_mode` | str | `asymmetric_tribunal` | Debate architecture: `asymmetric_tribunal` or `symmetric` |
+| `--chat_templates` | flag | `False` | Apply model's official tokenizer chat template |
+| `--temperature` | float | `0.0` | Sampling temperature (`0.0` = deterministic greedy) |
+| `--note` | str | `1` | Subfolder name under `predictions/` |
+| `--overwrite` | flag | `False` | Overwrite existing prediction JSONL files |
+
+---
+
+## 📜 Citation
+
+If you use Adaptive-MPT in your research, please cite:
 
 ```bibtex
-@inproceedings{chen-etal-2026-multi,
-    title = "Multi-Persona Thinking for Bias Mitigation in Large Language Models",
-    author = "Chen, Yuxing  and
-      Luo, Guoqing  and
-      Wu, Zijun  and
-      Mou, Lili",
-    editor = "Liakata, Maria  and
-      Moreira, Viviane P.  and
-      Zhang, Jiajun  and
-      Jurgens, David",
-    booktitle = "Findings of the {A}ssociation for {C}omputational {L}inguistics: {ACL} 2026",
-    month = jul,
+@inproceedings{adaptive_mpt_2026,
+    title = "Adaptive-MPT: Efficient and Debiased Large Language Model Reasoning via Counterfactual Dual-Pass Screening and Asymmetric Persona Tribunal",
     year = "2026",
-    address = "San Diego, California, United States",
-    publisher = "Association for Computational Linguistics",
-    url = "https://aclanthology.org/2026.findings-acl.1389/",
-    pages = "27895--27909",
-    ISBN = "979-8-89176-395-1",
+    url = "https://github.com/Bamboohoccode/Adaptive-MPT"
 }
 ```

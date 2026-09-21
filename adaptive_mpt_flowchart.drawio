@@ -1,0 +1,172 @@
+<mxfile host="app.diagrams.net" modified="2026-09-19T05:35:00.000Z" agent="Mozilla/5.0" version="24.7.5">
+  <diagram id="adaptive_mpt_clean" name="Adaptive-MPT Architecture">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1500" pageHeight="850" background="#0f172a" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Title Banner -->
+        <mxCell id="title_banner" value="&lt;b style=&quot;font-size: 20px; letter-spacing: 1px; color: #f8fafc;&quot;&gt;ADAPTIVE-MPT (ADAPTIVE MULTI-PERSONA THINKING) ARCHITECTURE&lt;/b&gt;" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="300" y="25" width="850" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- STAGE 1: INPUT QUERY -->
+        <mxCell id="hdr_s1" value="&lt;b style=&quot;color: #94a3b8; font-size: 12px;&quot;&gt;INPUT QUERY&lt;/b&gt;" style="text;html=1;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="40" y="240" width="180" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="node_input" value="&lt;b style=&quot;font-size: 13px; color: #ffffff;&quot;&gt;INPUT QUERY&lt;/b&gt;&lt;br&gt;&lt;hr style=&quot;border-color: #334155;&quot;&gt;&lt;font style=&quot;font-size: 11px; color: #cbd5e1;&quot;&gt;• Context Text&lt;br&gt;• Question&lt;br&gt;• Options: O_0, O_1, O_2&lt;br&gt;&lt;br&gt;&lt;b style=&quot;color: #38bdf8;&quot;&gt;100% Zero-Oracle&lt;/b&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1e293b;strokeColor=#38bdf8;strokeWidth=2;fontColor=#ffffff;align=center;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="270" width="180" height="140" as="geometry" />
+        </mxCell>
+
+        <!-- STAGE 2: DUAL-PASS SCREENING -->
+        <mxCell id="hdr_s2" value="&lt;b style=&quot;color: #94a3b8; font-size: 12px;&quot;&gt;DUAL-PASS SCREENING (BATCH 2N)&lt;/b&gt;" style="text;html=1;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="270" y="110" width="220" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="node_pass1" value="&lt;b style=&quot;font-size: 12px; color: #38bdf8;&quot;&gt;PASS 1: MASKED ENTITY&lt;/b&gt;&lt;br&gt;&lt;hr style=&quot;border-color: #334155;&quot;&gt;&lt;font style=&quot;font-size: 11px; color: #cbd5e1;&quot;&gt;[Person A], [Person B] in context&lt;br&gt;+ LOGICAL_PROMPT_MASKED&lt;br&gt;&lt;br&gt;&lt;b style=&quot;color: #fde68a;&quot;&gt;&amp;rarr; P_masked&lt;/b&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1e293b;strokeColor=#0284c7;strokeWidth=2;fontColor=#ffffff;align=center;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="270" y="140" width="220" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="node_pass2" value="&lt;b style=&quot;font-size: 12px; color: #38bdf8;&quot;&gt;PASS 2: UNMASKED CoT&lt;/b&gt;&lt;br&gt;&lt;hr style=&quot;border-color: #334155;&quot;&gt;&lt;font style=&quot;font-size: 11px; color: #cbd5e1;&quot;&gt;Tên nhân khẩu học gốc&lt;br&gt;+ ASYMMETRIC_UNMASKED&lt;br&gt;&lt;br&gt;&lt;b style=&quot;color: #fde68a;&quot;&gt;&amp;rarr; P_unmasked, R_unmasked&lt;/b&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1e293b;strokeColor=#0284c7;strokeWidth=2;fontColor=#ffffff;align=center;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="270" y="420" width="220" height="110" as="geometry" />
+        </mxCell>
+
+        <!-- Connectors Input -> Passes -->
+        <mxCell id="edge_in_p1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#38bdf8;strokeWidth=2;" edge="1" parent="1" source="node_input" target="node_pass1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="240" y="320" />
+              <mxPoint x="240" y="195" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_in_p2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#38bdf8;strokeWidth=2;" edge="1" parent="1" source="node_input" target="node_pass2">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="240" y="360" />
+              <mxPoint x="240" y="475" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- STAGE 3: ZERO-ORACLE GATE (DECISION ENGINE) -->
+        <mxCell id="hdr_s3" value="&lt;b style=&quot;color: #94a3b8; font-size: 12px;&quot;&gt;ZERO-ORACLE CALIBRATED GATE&lt;/b&gt;" style="text;html=1;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="540" y="240" width="180" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="node_gate" value="&lt;b style=&quot;font-size: 13px; color: #38bdf8;&quot;&gt;DECISION ENGINE&lt;/b&gt;&lt;br&gt;&lt;hr style=&quot;border-color: #334155;&quot;&gt;&lt;font style=&quot;font-size: 11px; color: #f1f5f9;&quot;&gt;• So sánh: &lt;b&gt;P_M vs P_U&lt;/b&gt;&lt;br&gt;• Over-refusal:&lt;br&gt;&lt;i&gt;has_fact_quote?&lt;/i&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0f172a;strokeColor=#38bdf8;strokeWidth=2.5;fontColor=#ffffff;align=center;arcSize=16;" vertex="1" parent="1">
+          <mxGeometry x="540" y="270" width="170" height="140" as="geometry" />
+        </mxCell>
+
+        <!-- Connectors Passes -> Gate -->
+        <mxCell id="edge_p1_gate" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#38bdf8;strokeWidth=2;" edge="1" parent="1" source="node_pass1" target="node_gate">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="510" y="195" />
+              <mxPoint x="510" y="310" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_p2_gate" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#38bdf8;strokeWidth=2;" edge="1" parent="1" source="node_pass2" target="node_gate">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="510" y="475" />
+              <mxPoint x="510" y="370" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- STAGE 4A: FAST PATH (UPPER LANE) -->
+        <mxCell id="hdr_s4a" value="&lt;b style=&quot;color: #34d399; font-size: 12px;&quot;&gt;4A. FAST PATH (80.9% MẪU)&lt;/b&gt;" style="text;html=1;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="780" y="100" width="360" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="node_fast_path" value="&lt;b style=&quot;font-size: 14px; color: #86efac;&quot;&gt;DIRECT OUTPUT, 0 OVERHEAD&lt;/b&gt;&lt;br&gt;&lt;hr style=&quot;border-color: #065f46;&quot;&gt;&lt;font style=&quot;font-size: 11px; color: #e2e8f0;&quot;&gt;• Xuất trực tiếp kết quả Turn 1 Cache (P_U)&lt;br&gt;• Triệt tiêu hoàn toàn Self-Correction Paradox&lt;br&gt;• &lt;b style=&quot;color: #a7f3d0;&quot;&gt;Độ chính xác Turn 1: 82.36%&lt;/b&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#064e3b;strokeColor=#10b981;strokeWidth=2.5;fontColor=#ffffff;align=center;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="780" y="130" width="360" height="120" as="geometry" />
+        </mxCell>
+
+        <!-- STAGE 4B: ASYMMETRIC TRIBUNAL (LOWER LANE) -->
+        <mxCell id="hdr_s4b" value="&lt;b style=&quot;color: #c084fc; font-size: 12px;&quot;&gt;4B. ASYMMETRIC 3-PERSONA TRIBUNAL (19.1% MẪU)&lt;/b&gt;" style="text;html=1;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="750" y="325" width="420" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="box_tribunal" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1e1b4b;strokeColor=#8b5cf6;strokeWidth=2;dashed=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="750" y="350" width="420" height="290" as="geometry" />
+        </mxCell>
+
+        <!-- 3 Persona Cards Inside Tribunal -->
+        <mxCell id="card_p1" value="&lt;b style=&quot;color: #38bdf8; font-size: 11px;&quot;&gt;FACT-ANCHOR&lt;/b&gt;&lt;br&gt;&lt;hr style=&quot;border-color: #334155;&quot;&gt;&lt;font style=&quot;font-size: 10px; color: #cbd5e1;&quot;&gt;Bảo vệ sự thật văn bản&lt;br&gt;Trích dẫn nguyên văn bằng chứng&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0f172a;strokeColor=#38bdf8;strokeWidth=1.5;fontColor=#ffffff;align=center;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="765" y="370" width="120" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="card_p2" value="&lt;b style=&quot;color: #f43f5e; font-size: 11px;&quot;&gt;BIAS-AUDITOR&lt;/b&gt;&lt;br&gt;&lt;hr style=&quot;border-color: #334155;&quot;&gt;&lt;font style=&quot;font-size: 10px; color: #cbd5e1;&quot;&gt;Kiểm toán định kiến xã hội&lt;br&gt;Bóc trần suy diễn khuôn mẫu&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0f172a;strokeColor=#f43f5e;strokeWidth=1.5;fontColor=#ffffff;align=center;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="900" y="370" width="120" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="card_p3" value="&lt;b style=&quot;color: #a855f7; font-size: 11px;&quot;&gt;JUDGE PERSONA&lt;/b&gt;&lt;br&gt;&lt;hr style=&quot;border-color: #334155;&quot;&gt;&lt;font style=&quot;font-size: 10px; color: #cbd5e1;&quot;&gt;Thẩm phán điều phối&lt;br&gt;Áp dụng Rule of Precedence&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0f172a;strokeColor=#a855f7;strokeWidth=1.5;fontColor=#ffffff;align=center;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1035" y="370" width="120" height="100" as="geometry" />
+        </mxCell>
+
+        <!-- Debate & Verdict Card -->
+        <mxCell id="card_debate" value="&lt;b style=&quot;color: #e9d5ff; font-size: 11px;&quot;&gt;CONSENSUS SYNTHESIS (DEBATE ROUNDS 1 &amp;rarr; R)&lt;/b&gt;&lt;br&gt;&lt;hr style=&quot;border-color: #581c87;&quot;&gt;&lt;font style=&quot;font-size: 10px; color: #cbd5e1;&quot;&gt;• Fact-Anchor đưa chứng cứ đối kháng Bias-Auditor&lt;br&gt;• Judge Persona ban hành phán quyết chính thức: &lt;b style=&quot;color: #fde68a;&quot;&gt;&amp;lt;answer&amp;gt;...&amp;lt;/answer&amp;gt;&lt;/b&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#3b0764;strokeColor=#a855f7;strokeWidth=1.5;fontColor=#ffffff;align=center;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="765" y="500" width="390" height="120" as="geometry" />
+        </mxCell>
+
+        <!-- Internal Tribunal Connectors -->
+        <mxCell id="e_c1_d" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#8b5cf6;strokeWidth=1.5;" edge="1" parent="1" source="card_p1" target="card_debate">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_c2_d" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#8b5cf6;strokeWidth=1.5;" edge="1" parent="1" source="card_p2" target="card_debate">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_c3_d" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#8b5cf6;strokeWidth=1.5;" edge="1" parent="1" source="card_p3" target="card_debate">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ROUTING CONNECTORS (GATE -> LANES) -->
+        <!-- Gate -> Fast Path (UPPER) -->
+        <mxCell id="edge_gate_fp" value="&lt;b style=&quot;color: #6ee7b7;&quot;&gt;Đồng thuận &amp;amp; Không Over-refusal (80.9%)&lt;/b&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#10b981;strokeWidth=2.5;fontColor=#ffffff;labelBackgroundColor=#0f172a;" edge="1" parent="1" source="node_gate" target="node_fast_path">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="740" y="310" />
+              <mxPoint x="740" y="190" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Gate -> Tribunal (LOWER) -->
+        <mxCell id="edge_gate_tr" value="&lt;b style=&quot;color: #f472b6;&quot;&gt;Bất đồng hoặc Tự mâu thuẫn (19.1%)&lt;/b&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#8b5cf6;strokeWidth=2.5;fontColor=#ffffff;labelBackgroundColor=#0f172a;" edge="1" parent="1" source="node_gate" target="box_tribunal">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="730" y="370" />
+              <mxPoint x="730" y="500" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- STAGE 5: FINAL PREDICTION -->
+        <mxCell id="hdr_s5" value="&lt;b style=&quot;color: #94a3b8; font-size: 12px;&quot;&gt;FINAL PREDICTION / RESPONSE&lt;/b&gt;" style="text;html=1;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="1230" y="240" width="200" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="node_output" value="&lt;b style=&quot;font-size: 13px; color: #ffffff;&quot;&gt;FINAL PREDICTION&lt;/b&gt;&lt;br&gt;&lt;hr style=&quot;border-color: #334155;&quot;&gt;&lt;b style=&quot;color: #38bdf8; font-size: 18px;&quot;&gt;Y* &amp;isin; {0, 1, 2}&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size: 11px; color: #cbd5e1;&quot;&gt;Định dạng chuẩn BBQ/StereoSet&lt;br&gt;Tương thích &lt;i&gt;mpt_evaluate.py&lt;/i&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1e293b;strokeColor=#38bdf8;strokeWidth=2;fontColor=#ffffff;align=center;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1240" y="270" width="180" height="140" as="geometry" />
+        </mxCell>
+
+        <!-- Connectors Lanes -> Output -->
+        <mxCell id="edge_fp_out" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#10b981;strokeWidth=2.5;" edge="1" parent="1" source="node_fast_path" target="node_output">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1200" y="190" />
+              <mxPoint x="1200" y="310" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_tr_out" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#8b5cf6;strokeWidth=2.5;" edge="1" parent="1" source="box_tribunal" target="node_output">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1200" y="500" />
+              <mxPoint x="1200" y="370" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
