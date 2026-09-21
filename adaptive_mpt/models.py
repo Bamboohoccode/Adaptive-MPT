@@ -13,6 +13,15 @@ from adaptive_mpt.prompts import (
 
 TOTAL_LLM_CALLS = 0
 
+def get_total_llm_calls():
+    """Return total number of prompt decodings executed."""
+    return TOTAL_LLM_CALLS
+
+def reset_total_llm_calls():
+    """Reset LLM call counter."""
+    global TOTAL_LLM_CALLS
+    TOTAL_LLM_CALLS = 0
+
 class LLMDecoder:
     """Production LLM Decoder wrapping vLLM and OpenAI APIs ."""
     def __init__(self, args, model_name):

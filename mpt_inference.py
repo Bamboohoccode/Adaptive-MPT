@@ -12,7 +12,7 @@ import torch
 from pathlib import Path
 
 from adaptive_mpt.data import set_tasks_BBQ, set_tasks_stereoset, load_dataset_records, save_dataset_records
-from adaptive_mpt.models import LLMDecoder, TOTAL_LLM_CALLS
+from adaptive_mpt.models import LLMDecoder, get_total_llm_calls
 from adaptive_mpt.pipeline import (
     run_dual_pass_screening,
     route_samples,
@@ -114,7 +114,7 @@ def main():
         # 5. Save predictions
         save_dataset_records(sample_records, category_manifest)
 
-    print(f"\nInference Complete. Total LLM Calls: {TOTAL_LLM_CALLS}\n")
+    print(f"\nInference Complete. Total LLM Calls: {get_total_llm_calls()}\n")
 
 if __name__ == "__main__":
     main()

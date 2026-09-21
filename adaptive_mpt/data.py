@@ -45,6 +45,7 @@ def mask_entities(item):
     names = sorted(set(names), key=lambda x: -len(x))
     placeholders = ["[Person A]", "[Person B]", "[Person C]"]
     name_map = {}
+    # Replace all Person in that sentence no matter how many people.
     for idx, name in enumerate(names):
         name_map[name] = placeholders[idx] if idx < len(placeholders) else f"[Person {chr(65+idx)}]"
 
@@ -52,13 +53,14 @@ def mask_entities(item):
     question = masked_item.get("question", "")
     for name, ph in name_map.items():
         pattern = re.compile(re.escape(name), re.IGNORECASE)
+        # Subtitute pattern by ph
         context = pattern.sub(ph, context)
         question = pattern.sub(ph, question)
 
     masked_item["context"] = context
     masked_item["question"] = question
     masked_item["_entity_map"] = name_map
-
+    # Create new answer_info(Not important)
     new_ans_info = {}
     for ans_key, val in ans_info.items():
         if isinstance(val, (list, tuple)):
@@ -68,7 +70,7 @@ def mask_entities(item):
         else:
             new_ans_info[ans_key] = name_map.get(str(val), val)
     masked_item["answer_info"] = new_ans_info
-
+    # Masking answer !!! 
     for opt_key in ("ans0", "ans1", "ans2"):
         if opt_key in masked_item:
             text = masked_item[opt_key]
@@ -87,10 +89,15 @@ def get_undetermined_index(item):
             match = re.search(r'\d+', key)
             if match:
                 return int(match.group())
+    undetermined_keywords = [
+        "cannot be determined", "can't be determined", "not enough info",
+        "undetermined", "not answerable", "cannot answer", "can't answer",
+        "not known", "unknown"
+    ]
     for opt_key in ("ans0", "ans1", "ans2"):
         if opt_key in item:
             text = str(item[opt_key]).lower()
-            if any(w in text for w in ["cannot be determined", "can't be determined", "not enough info", "undetermined"]):
+            if any(w in text for w in undetermined_keywords):
                 match = re.search(r'\d+', opt_key)
                 if match:
                     return int(match.group())
@@ -101,7 +108,7 @@ def is_classified_as_ambiguous(item, pred):
     return pred == get_undetermined_index(item)
 
 def load_dataset_records(args, batch_input_paths):
-    """Load dataset records and apply deterministic sampling under Ponytail principles."""
+    """Load dataset records and apply deterministic sampling."""
     dataset = args.dataset
     models_name = "_".join(dict.fromkeys(args.models))
     sample_records = []
