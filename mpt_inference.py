@@ -64,6 +64,8 @@ def parse_arguments():
     parser.add_argument("--fast_path_method", type=str, default="logical", help="Fast path strategy")
     parser.add_argument("--asymmetric", action="store_true", default=True, help="Asymmetric Tribunal mode (fixed)")
     parser.add_argument("--debate_mode", type=str, default="asymmetric_tribunal", help="Debate mode (fixed)")
+    parser.add_argument("--cot_guard", "--over_refusal_guard", action="store_true", default=False,
+                        help="Optional CoT keyword scanning to rescue potential over-refusal in Pass 2")
 
     args = parser.parse_args()
 

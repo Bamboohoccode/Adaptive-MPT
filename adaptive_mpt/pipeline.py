@@ -116,6 +116,10 @@ def route_samples(args, sample_records, p_masked, p_unmasked, cot_unmasked):
     fast_path_indices = []
     tribunal_indices = []
 
+    cot_guard_enabled = getattr(args, "cot_guard", False)
+    if cot_guard_enabled:
+        print("CoT Over-Refusal Guard: ENABLED")
+
     for i in range(total_samples):
         pm = p_masked[i]
         pu = p_unmasked[i]
@@ -123,7 +127,7 @@ def route_samples(args, sample_records, p_masked, p_unmasked, cot_unmasked):
 
         if pm == pu:
             is_over_refusal = False
-            if pm == u_idx and not args.truncate:
+            if pm == u_idx and cot_guard_enabled:
                 cot_lower = cot_unmasked[i].lower()
                 factual_evidence_anchored = any(kw in cot_lower for kw in [
                     "the context states", "the context explicitly", "according to the context",

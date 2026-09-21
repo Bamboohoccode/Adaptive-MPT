@@ -32,50 +32,60 @@ def set_tasks_stereoset():
     ]
 
 def mask_entities(item):
-    """Anonymize character identities to [Person A], [Person B] for objective logic checks."""
+    """Anonymize character identities to [Person A], [Person B] for objective logic checks.
+    
+    - BBQ: Masks demographic pairs into [Person A] and [Person B].
+    - StereoSet: Masks target identity/profession into [Person A].
+    """
     masked_item = dict(item)
     ans_info = item.get("answer_info", {})
-    names = []
-    for ans_key in ("ans0", "ans1", "ans2"):
-        if ans_key in ans_info:
-            val = ans_info[ans_key]
-            name = val[0] if isinstance(val, (list, tuple)) else str(val)
-            if name.lower() not in ("unknown", "cannot be determined", "can't be determined", "not answerable", "undetermined"):
-                names.append(name)
-    names = sorted(set(names), key=lambda x: -len(x))
-    placeholders = ["[Person A]", "[Person B]", "[Person C]"]
     name_map = {}
-    # Replace all Person in that sentence no matter how many people.
-    for idx, name in enumerate(names):
-        name_map[name] = placeholders[idx] if idx < len(placeholders) else f"[Person {chr(65+idx)}]"
 
-    context = masked_item.get("context", "")
-    question = masked_item.get("question", "")
+    if ans_info:
+        names = []
+        for ans_key in ("ans0", "ans1", "ans2"):
+            if ans_key in ans_info:
+                val = ans_info[ans_key]
+                name = val[0] if isinstance(val, (list, tuple)) else str(val)
+                if name.lower() not in ("unknown", "cannot be determined", "can't be determined", "not answerable", "undetermined"):
+                    names.append(name)
+        names = sorted(set(names), key=lambda x: -len(x))
+        placeholders = ["[Person A]", "[Person B]", "[Person C]"]
+        for idx, name in enumerate(names):
+            name_map[name] = placeholders[idx] if idx < len(placeholders) else f"[Person {chr(65+idx)}]"
+
+    elif "target" in item and item["target"]:
+        target = str(item["target"]).strip()
+        name_map[target] = "[Person A]"
+
+    context = str(masked_item.get("context", ""))
+    question = str(masked_item.get("question", ""))
     for name, ph in name_map.items():
-        pattern = re.compile(re.escape(name), re.IGNORECASE)
-        # Subtitute pattern by ph
+        pattern = re.compile(rf"\b{re.escape(name)}(?:'s|s|es)?\b", re.IGNORECASE)
         context = pattern.sub(ph, context)
         question = pattern.sub(ph, question)
 
     masked_item["context"] = context
     masked_item["question"] = question
     masked_item["_entity_map"] = name_map
-    # Create new answer_info(Not important)
-    new_ans_info = {}
-    for ans_key, val in ans_info.items():
-        if isinstance(val, (list, tuple)):
-            old_name = val[0]
-            new_name = name_map.get(old_name, old_name)
-            new_ans_info[ans_key] = [new_name] + list(val[1:])
-        else:
-            new_ans_info[ans_key] = name_map.get(str(val), val)
-    masked_item["answer_info"] = new_ans_info
-    # Masking answer !!! 
+
+    if ans_info:
+        new_ans_info = {}
+        for ans_key, val in ans_info.items():
+            if isinstance(val, (list, tuple)):
+                old_name = val[0]
+                new_name = name_map.get(old_name, old_name)
+                new_ans_info[ans_key] = [new_name] + list(val[1:])
+            else:
+                new_ans_info[ans_key] = name_map.get(str(val), val)
+        masked_item["answer_info"] = new_ans_info
+
     for opt_key in ("ans0", "ans1", "ans2"):
         if opt_key in masked_item:
-            text = masked_item[opt_key]
+            text = str(masked_item[opt_key])
             for name, ph in name_map.items():
-                text = re.compile(re.escape(name), re.IGNORECASE).sub(ph, text)
+                pattern = re.compile(rf"\b{re.escape(name)}(?:'s|s|es)?\b", re.IGNORECASE)
+                text = pattern.sub(ph, text)
             masked_item[opt_key] = text
 
     return masked_item

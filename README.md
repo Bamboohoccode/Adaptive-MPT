@@ -179,6 +179,7 @@ python mpt_evaluate.py \
 | `--num_rounds` | int | `2` | Number of Tribunal debate rounds |
 | `--note` | str | `1` | Subfolder name under `predictions/` |
 | `--overwrite` | flag | `False` | Overwrite existing prediction JSONL files |
+| `--cot_guard` | flag | `False` | Optional CoT keyword scanning to rescue over-refusal in Pass 2 |
 | `--router_method`| str | `context_sufficiency` | Fixed to `context_sufficiency` (Dual-Pass) |
 
 ---
