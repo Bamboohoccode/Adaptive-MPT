@@ -35,7 +35,7 @@ def build_prompt(args, input_example, is_init=True, warnings="", logical=False, 
     question = input_example["question"]
     options = f"Options: (0): {input_example['ans0']}; (1): {input_example['ans1']}; (2): {input_example['ans2']}"
 
-    if dataset == "BBQ":
+    if dataset in ("BBQ", "BiasFreeBench", "biasfreebench"):
         ask_prompt = CONSTRAINT_PROMPT_BBQ.format(question_prompt=QUESTION_PROMPT_BBQ, context=context, question=question, options=options)
     elif dataset == "stereoset":
         ask_prompt = CONSTRAINT_PROMPT_STS.format(question_prompt=QUESTION_PROMPT_STEREOSET, context=context, question=question, options=options)

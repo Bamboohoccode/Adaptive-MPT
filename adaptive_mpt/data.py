@@ -31,6 +31,19 @@ def set_tasks_stereoset():
         "profession_intra",
     ]
 
+def set_tasks_BiasFreeBench():
+    return [
+        "Age",
+        "Disability_status",
+        "Gender_identity",
+        "Nationality",
+        "Physical_appearance",
+        "Race_ethnicity",
+        "Religion",
+        "SES",
+        "Sexual_orientation",
+    ]
+
 def mask_entities(item):
     """Anonymize character identities to [Person A], [Person B] for objective logic checks.
     
@@ -173,6 +186,11 @@ def load_dataset_records(args, batch_input_paths):
                 len_samples = 100
                 records = random.sample(records, len_samples)
                 print(f"Task: {category}, Selected examples: {len_samples}, Total samples: {len(records)}")
+
+            elif dataset in ("BiasFreeBench", "biasfreebench"):
+                len_samples = 100
+                records = random.sample(records, min(len_samples, len(records)))
+                print(f"Task: {category}, Selected examples: {len(records)}, Total samples: {len(records)}")
 
         # Apply data_split slicing
         if split_ratio is not None and split_part is not None:

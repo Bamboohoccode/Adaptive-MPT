@@ -169,9 +169,9 @@ python mpt_evaluate.py \
 | Argument | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `--models` | list | `meta-llama/Llama-3.1-8B-Instruct` | HuggingFace model path or identifier |
-| `--dataset` | str | `BBQ` | Evaluation benchmark: `BBQ` or `stereoset` |
+| `--dataset` | str | `BBQ` | Evaluation benchmark: `BBQ`, `stereoset`, or `BiasFreeBench` |
 | `--num_gpus` | int | `2` | Tensor parallel size for vLLM |
-| `--truncate` | flag | `False` | Sample 880 standard evaluation subset on BBQ |
+| `--truncate` | flag | `False` | Sample standard evaluation subset (880 for BBQ, 800 for StereoSet, 900 for BiasFreeBench) |
 | `--random_seed` | int | `0` | RNG seed for deterministic sample selection |
 | `--chat_templates` | flag | `False` | Apply model's official tokenizer chat template |
 | `--temperature` | float | `0.0` | Sampling temperature (`0.0` = deterministic greedy) |

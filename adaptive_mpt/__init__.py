@@ -10,6 +10,7 @@ from adaptive_mpt.prompts import (
 from adaptive_mpt.data import (
     set_tasks_BBQ,
     set_tasks_stereoset,
+    set_tasks_BiasFreeBench,
     mask_entities,
     get_undetermined_index,
     is_classified_as_ambiguous,
