@@ -124,13 +124,26 @@ def load_dataset_records(args, batch_input_paths):
     sample_records = []
     category_manifest = []
 
+    data_split = getattr(args, "data_split", None)
+    split_ratio = None
+    split_part = None
+    if data_split is not None:
+        split_ratio = float(data_split[0])
+        split_part = int(data_split[1])
+        if not (0.0 < split_ratio <= 1.0):
+            raise ValueError(f"Split ratio must be in (0, 1], got {split_ratio}")
+        if split_part < 1:
+            raise ValueError(f"Split part index must be >= 1, got {split_part}")
+
     for input_path in batch_input_paths:
         category = Path(input_path).stem
         output_dir = Path("predictions") / dataset / models_name / args.note / args.method
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_file = output_dir / f"preds_{category}.jsonl"
+        
+        split_suffix = f"_part{split_part}" if split_part is not None else ""
+        output_file = output_dir / f"preds_{category}{split_suffix}.jsonl"
 
-        if output_file.exists():
+        if output_file.exists() and not getattr(args, "overwrite", False) and split_part is None:
             records = [json.loads(line) for line in xopen(output_file, "r", encoding="utf-8")]
         else:
             records = [json.loads(line) for line in xopen(input_path, "r", encoding="utf-8")]
@@ -160,6 +173,29 @@ def load_dataset_records(args, batch_input_paths):
                 len_samples = 100
                 records = random.sample(records, len_samples)
                 print(f"Task: {category}, Selected examples: {len_samples}, Total samples: {len(records)}")
+
+        # Apply data_split slicing
+        if split_ratio is not None and split_part is not None:
+            total_n = len(records)
+            start_idx = int((split_part - 1) * split_ratio * total_n)
+            if split_part * split_ratio < 1.0:
+                end_idx = min(int(split_part * split_ratio * total_n), total_n)
+            else:
+                end_idx = total_n
+
+            if dataset == "BBQ":
+                start_idx = (start_idx // 4) * 4
+                if split_part * split_ratio < 1.0:
+                    end_idx = (end_idx // 4) * 4
+                else:
+                    end_idx = total_n
+
+            if start_idx >= total_n:
+                raise ValueError(f"Split part {split_part} is out of bounds for ratio {split_ratio} (total available: {total_n})")
+
+            orig_len = len(records)
+            records = records[start_idx:end_idx]
+            print(f"Task: {category}, Split [{split_ratio}, Part {split_part}]: Sliced [{start_idx}:{end_idx}] ({len(records)}/{orig_len} samples)")
 
         for line in records:
             line['_task_category'] = category

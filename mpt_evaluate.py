@@ -354,7 +354,8 @@ def main():
         print(f"Notice: Configured method '{method_name}' not found, but detected '{detected_method}' in predictions. Auto-evaluating '{detected_method}'.")
         method_name = detected_method
 
-    output_file = output_dir / f"rsts_{method_name}.csv"
+    split_suffix = f"_part{int(args.data_split[1])}" if getattr(args, "data_split", None) is not None else ""
+    output_file = output_dir / f"rsts_{method_name}{split_suffix}.csv"
 
     for path in args.results_paths:
         if not path.exists():
@@ -517,19 +518,35 @@ def parse_arguments():
         help="Whether use chat templates"
     )
 
+    parser.add_argument(
+        "--data_split", "--data_part", "--subset_split", type=float, nargs=2, default=None,
+        metavar=("RATIO", "PART"),
+        help="Evaluate specific split (e.g. --data_split 0.5 1)"
+    )
+
     args = parser.parse_args()
+
+    split_suffix = f"_part{int(args.data_split[1])}" if getattr(args, "data_split", None) is not None else ""
 
     if args.dataset=="BBQ":
         tasks = set_tasks_BBQ()
         models_str = "_".join(dict.fromkeys(args.models))
         base = Path("predictions")/args.dataset/models_str/args.note/args.method
-        args.results_paths = [ base/f"preds_{t}.jsonl" for t in tasks ]
+        args.results_paths = [
+            (base / f"preds_{t}{split_suffix}.jsonl") if (base / f"preds_{t}{split_suffix}.jsonl").exists()
+            else (base / f"preds_{t}.jsonl")
+            for t in tasks
+        ]
 
     elif args.dataset=="stereoset":
         tasks = set_tasks_stereoset()
         models_str = "_".join(dict.fromkeys(args.models))
         base = Path("predictions")/args.dataset/models_str/args.note/args.method
-        args.results_paths = [ base/f"preds_{t}.jsonl" for t in tasks ]
+        args.results_paths = [
+            (base / f"preds_{t}{split_suffix}.jsonl") if (base / f"preds_{t}{split_suffix}.jsonl").exists()
+            else (base / f"preds_{t}.jsonl")
+            for t in tasks
+        ]
 
     return args
 

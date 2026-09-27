@@ -180,6 +180,7 @@ python mpt_evaluate.py \
 | `--note` | str | `1` | Subfolder name under `predictions/` |
 | `--overwrite` | flag | `False` | Overwrite existing prediction JSONL files |
 | `--cot_guard` | flag | `False` | Optional CoT keyword scanning to rescue over-refusal in Pass 2 |
+| `--data_split` | float float | `None` | Split dataset by fraction and part index (e.g. `0.5 1` for 1st half, `0.5 2` for 2nd half) |
 | `--router_method`| str | `context_sufficiency` | Fixed to `context_sufficiency` (Dual-Pass) |
 
 ---

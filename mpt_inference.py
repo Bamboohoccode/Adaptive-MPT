@@ -63,9 +63,11 @@ def parse_arguments():
                         help="Routing method (fixed to context_sufficiency)")
     parser.add_argument("--fast_path_method", type=str, default="logical", help="Fast path strategy")
     parser.add_argument("--asymmetric", action="store_true", default=True, help="Asymmetric Tribunal mode (fixed)")
-    parser.add_argument("--debate_mode", type=str, default="asymmetric_tribunal", help="Debate mode (fixed)")
     parser.add_argument("--cot_guard", "--over_refusal_guard", action="store_true", default=False,
                         help="Optional CoT keyword scanning to rescue potential over-refusal in Pass 2")
+    parser.add_argument("--data_split", "--data_part", "--subset_split", type=float, nargs=2, default=None,
+                        metavar=("RATIO", "PART"),
+                        help="Split dataset by fraction and part index (e.g., --data_split 0.5 1 for 1st half, 0.5 2 for 2nd half)")
 
     args = parser.parse_args()
 
@@ -91,7 +93,8 @@ def main():
 
     print("=" * 80)
     print("Adaptive-MPT Pipeline: Router = context_sufficiency (Fixed) | Mode = Asymmetric Tribunal")
-    print(f"Model: {args.models[0]} | Dataset: {args.dataset} | Truncate: {args.truncate} | Seed: {args.random_seed}")
+    split_str = f" | Split: {args.data_split[0]} (Part {int(args.data_split[1])})" if getattr(args, "data_split", None) else ""
+    print(f"Model: {args.models[0]} | Dataset: {args.dataset} | Truncate: {args.truncate}{split_str} | Seed: {args.random_seed}")
     print("=" * 80)
 
     models = [LLMDecoder(args, model) for model in args.models]
