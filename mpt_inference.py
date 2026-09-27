@@ -11,13 +11,7 @@ import numpy as np
 import torch
 from pathlib import Path
 
-from adaptive_mpt.data import (
-    set_tasks_BBQ,
-    set_tasks_stereoset,
-    set_tasks_BiasFreeBench,
-    load_dataset_records,
-    save_dataset_records,
-)
+from adaptive_mpt.data import set_tasks_BBQ, set_tasks_stereoset, load_dataset_records, save_dataset_records
 from adaptive_mpt.models import LLMDecoder, get_total_llm_calls
 from adaptive_mpt.pipeline import (
     run_dual_pass_screening,
@@ -41,8 +35,8 @@ def parse_arguments():
 
     # Benchmark & Model
     parser.add_argument("--models", type=str, nargs="+", default=["meta-llama/Llama-3.1-8B-Instruct"], help="Model name or path")
-    parser.add_argument("--dataset", type=str, default="BBQ", choices=["BBQ", "stereoset", "BiasFreeBench", "biasfreebench"], help="Benchmark dataset")
-    parser.add_argument("--truncate", action="store_true", help="Sample standard evaluation subset")
+    parser.add_argument("--dataset", type=str, default="BBQ", choices=["BBQ", "stereoset"], help="Benchmark dataset")
+    parser.add_argument("--truncate", action="store_true", help="Sample standard 880-sample evaluation subset on BBQ")
     parser.add_argument("--random_seed", type=int, default=0, help="Random seed for deterministic sampling")
 
     # Hardware & Engine
@@ -89,10 +83,6 @@ def parse_arguments():
     elif args.dataset == "stereoset":
         tasks = set_tasks_stereoset()
         args.input_paths = [f"./data/{args.dataset}/{task}.jsonl" for task in tasks]
-    elif args.dataset in ("BiasFreeBench", "biasfreebench"):
-        args.dataset = "BiasFreeBench"
-        tasks = set_tasks_BiasFreeBench()
-        args.input_paths = [f"./data/BiasFreeBench/{task}.jsonl" for task in tasks]
 
     return args
 
