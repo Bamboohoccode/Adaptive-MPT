@@ -44,39 +44,160 @@ def set_tasks_BiasFreeBench():
         "Sexual_orientation",
     ]
 
+UNDETERMINED_PHRASES = {
+    "unknown", "undetermined", "not known", "not answerable",
+    "cannot be determined", "can't be determined",
+    "cannot answer", "can't answer",
+    "not enough info", "not enough information",
+}
+
+def _normalize_option(text):
+    return str(text).strip().rstrip(".").strip().lower()
+
+# StereoSet targets are not always people (countries, scriptures, ...), so pick a placeholder per category
+STEREOSET_PLACEHOLDERS = {
+    "gender": "[Person A]",
+    "race": "[Group A]",
+    "religion": "[Religion A]",
+    "profession": "[Profession A]",
+}
+
+GENDERED_WORDS = {
+    "man": "person", "men": "people", "woman": "person", "women": "people",
+    "boy": "child", "boys": "children", "girl": "child", "girls": "children",
+    "gentleman": "person", "gentlemen": "people", "lady": "person", "ladies": "people",
+    "guy": "person", "guys": "people",
+    "mom": "parent", "moms": "parents", "mum": "parent", "mother": "parent", "mothers": "parents",
+    "dad": "parent", "dads": "parents", "father": "parent", "fathers": "parents",
+    "mommy": "parent", "daddy": "parent",
+    "grandmother": "grandparent", "grandfather": "grandparent", "grandma": "grandparent", "grandpa": "grandparent",
+    "husband": "spouse", "wife": "spouse", "husbands": "spouses", "wives": "spouses",
+    "boyfriend": "partner", "girlfriend": "partner",
+    "son": "child", "daughter": "child", "sons": "children", "daughters": "children",
+    "brother": "sibling", "sister": "sibling", "brothers": "siblings", "sisters": "siblings",
+    "uncle": "relative", "aunt": "relative", "nephew": "relative", "niece": "relative",
+    "himself": "themself", "herself": "themself",
+}
+
+# Words after "her" that mean it is an object pronoun ("told her that"), not a possessive ("her car")
+_HER_OBJECT_FOLLOWERS = {
+    "and", "or", "but", "to", "with", "for", "at", "in", "on", "a", "an", "the", "that", "as", "so",
+    "because", "up", "out", "off", "down", "back", "again", "too", "very", "more", "about", "from",
+    "by", "into", "over", "when", "if", "is", "was", "be", "how", "what", "why", "it", "this",
+}
+
+def _match_case(word, repl):
+    return repl[0].upper() + repl[1:] if word[:1].isupper() else repl
+
+def neutralize_gender(text, ph):
+    """Replace gendered pronouns with the placeholder and gendered nouns with neutral ones."""
+    text = re.sub(r"\b(?:he|she|him)\b", ph, text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:his|hers)\b", f"{ph}'s", text, flags=re.IGNORECASE)
+
+    def her(m):
+        nxt = m.group(1)
+        if nxt and nxt.lower() not in _HER_OBJECT_FOLLOWERS:
+            return f"{ph}'s {nxt}"
+        return ph + (f" {nxt}" if nxt else "")
+    text = re.sub(r"\bher\b(?:\s+([A-Za-z]+))?", her, text, flags=re.IGNORECASE)
+
+    pattern = re.compile(r"\b(" + "|".join(map(re.escape, GENDERED_WORDS)) + r")\b", re.IGNORECASE)
+    return pattern.sub(lambda m: _match_case(m.group(1), GENDERED_WORDS[m.group(1).lower()]), text)
+
+def _contains(text, phrase):
+    return re.search(rf"\b{re.escape(phrase)}\b", text, re.IGNORECASE) is not None
+
+def _split_name(name, context):
+    """Split an answer_info name that does not appear verbatim in the context into (name, descriptor).
+
+    BBQ Race_x_SES stores e.g. "Juan Rodriguez physician" while the context says
+    "Juan Rodriguez, who's a physician"; take the longest word prefix that occurs in the context.
+    """
+    if _contains(context, name):
+        return name, None
+    words = name.split()
+    for k in range(len(words) - 1, 0, -1):
+        head, tail = " ".join(words[:k]), " ".join(words[k:])
+        if _contains(context, head):
+            return head, (tail if _contains(context, tail) else None)
+    return name, None
+
+def _substitute(text, name_map, suffix):
+    """Replace all names in one pass, so a name like "person" never matches inside an inserted "[Person A]"."""
+    if not name_map:
+        return text
+    lookup = {name.lower(): ph for name, ph in name_map.items()}
+    alternatives = "|".join(re.escape(name) for name in sorted(name_map, key=len, reverse=True))
+    pattern = re.compile(rf"\b({alternatives})({suffix})?\b", re.IGNORECASE)
+
+    def repl(m):
+        base, suf = m.group(1), (m.group(2) or "").lower()
+        # "The cook cooks": a plural form right after the same noun is a verb, keep it
+        if suf in ("s", "es") and re.search(rf"\b{re.escape(base)}\s+$", m.string[:m.start()], re.IGNORECASE):
+            return m.group(0)
+        # Keep the possessive so "Juan's car" becomes "[Person A]'s car"
+        return lookup[base.lower()] + ("'s" if suf == "'s" else "")
+
+    return pattern.sub(repl, text)
+
 def mask_entities(item):
-    """Anonymize character identities to [Person A], [Person B] for objective logic checks.
-    
-    - BBQ: Masks demographic pairs into [Person A] and [Person B].
-    - StereoSet: Masks target identity/profession into [Person A].
+    """Anonymize character identities for objective logic checks.
+
+    - BBQ: Masks the people in the answer options into [Person A], [Person B], and SES descriptors
+      that are stored together with names (Race_x_SES) into [Role A], [Role B].
+    - StereoSet: Masks the target with a category-specific placeholder; for gender also neutralizes
+      gendered pronouns and nouns in the context and options.
     """
     masked_item = dict(item)
     ans_info = item.get("answer_info", {})
     name_map = {}
+    suffix = r"'s|s|es"
+    neutralize = None
 
     if ans_info:
-        names = []
+        context_text = str(item.get("context", ""))
+        names, roles = [], []
         for ans_key in ("ans0", "ans1", "ans2"):
             if ans_key in ans_info:
                 val = ans_info[ans_key]
                 name = val[0] if isinstance(val, (list, tuple)) else str(val)
-                if name.lower() not in ("unknown", "cannot be determined", "can't be determined", "not answerable", "undetermined"):
-                    names.append(name)
-        names = sorted(set(names), key=lambda x: -len(x))
-        placeholders = ["[Person A]", "[Person B]", "[Person C]"]
+                label = val[1] if isinstance(val, (list, tuple)) and len(val) > 1 else ""
+                # Use the annotation label, not the surface text: BBQ has 10 phrasings of the unknown option
+                if label == "unknown" or _normalize_option(name) in UNDETERMINED_PHRASES:
+                    continue
+                # Some BBQ Race_x_gender rows have empty names; recover them from the option text
+                if not name.strip():
+                    name = re.sub(r"^the\s+", "", str(item.get(ans_key, "")).strip(), flags=re.IGNORECASE)
+                if not name.strip():
+                    continue
+                person, role = _split_name(name.strip(), context_text)
+                if person not in names:
+                    names.append(person)
+                if role and role not in roles:
+                    roles.append(role)
         for idx, name in enumerate(names):
-            name_map[name] = placeholders[idx] if idx < len(placeholders) else f"[Person {chr(65+idx)}]"
+            name_map[name] = f"[Person {chr(65 + idx)}]"
+        for idx, role in enumerate(roles):
+            name_map.setdefault(role, f"[Role {chr(65 + idx)}]")
+        # Longest first so "Juan Rodriguez" is replaced before a shorter overlapping string
+        name_map = dict(sorted(name_map.items(), key=lambda kv: -len(kv[0])))
 
     elif "target" in item and item["target"]:
         target = str(item["target"]).strip()
-        name_map[target] = "[Person A]"
+        category = str(item.get("category", "")).lower()
+        ph = STEREOSET_PLACEHOLDERS.get(category, "[Person A]")
+        name_map[target] = ph
+        # Race targets are often countries used as demonyms ("Bolivia" -> "Bolivian", "Austrians")
+        suffix = r"'s|s|es|n|an|ns|ans" if category == "race" else r"'s|s|es"
+        if category == "gender":
+            neutralize = lambda text: neutralize_gender(text, ph)
 
-    context = str(masked_item.get("context", ""))
-    question = str(masked_item.get("question", ""))
-    for name, ph in name_map.items():
-        pattern = re.compile(rf"\b{re.escape(name)}(?:'s|s|es)?\b", re.IGNORECASE)
-        context = pattern.sub(ph, context)
-        question = pattern.sub(ph, question)
+    def mask_text(text):
+        text = _substitute(str(text), name_map, suffix)
+        return neutralize(text) if neutralize else text
+
+    context = mask_text(masked_item.get("context", ""))
+    question = mask_text(masked_item.get("question", ""))
 
     masked_item["context"] = context
     masked_item["question"] = question
@@ -95,11 +216,7 @@ def mask_entities(item):
 
     for opt_key in ("ans0", "ans1", "ans2"):
         if opt_key in masked_item:
-            text = str(masked_item[opt_key])
-            for name, ph in name_map.items():
-                pattern = re.compile(rf"\b{re.escape(name)}(?:'s|s|es)?\b", re.IGNORECASE)
-                text = pattern.sub(ph, text)
-            masked_item[opt_key] = text
+            masked_item[opt_key] = mask_text(masked_item[opt_key])
 
     return masked_item
 
@@ -112,6 +229,10 @@ def get_undetermined_index(item):
             match = re.search(r'\d+', key)
             if match:
                 return int(match.group())
+    # Prefer an option that is exactly an unknown phrase, so sentences merely containing "unknown" are not picked
+    for opt_key in ("ans0", "ans1", "ans2"):
+        if opt_key in item and _normalize_option(item[opt_key]) in UNDETERMINED_PHRASES:
+            return int(opt_key[-1])
     undetermined_keywords = [
         "cannot be determined", "can't be determined", "not enough info",
         "undetermined", "not answerable", "cannot answer", "can't answer",

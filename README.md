@@ -54,9 +54,9 @@ flowchart TD
 ### The 4 Core Components
 
 1. **Dual-Pass Batch Screening**: Evaluates each query twice in a single $2N$ batch on vLLM:
-   - **Pass 1 (Masked Logic)**: Anonymizes character identities to `[Person A]`, `[Person B]` with `LOGICAL_PROMPT_MASKED` (zero mention of bias) to establish objective ground-truth reasoning ($P_M$).
+   - **Pass 1 (Masked Logic)**: Anonymizes character identities to `[Person A]`, `[Person B]` with `LOGICAL_PROMPT_MASKED` (zero mention of bias) to establish objective ground-truth reasoning ($P_M$). See [Entity Masking](#-entity-masking) for the exact rules.
    - **Pass 2 (Unmasked CoT)**: Keeps original demographic identities with `LOGICAL_PROMPT_ASYMMETRIC_UNMASKED` to elicit self-audited reasoning ($P_U, R_U$).
-2. **Zero-Oracle Consistency Gate**: 100% blind to ground-truth labels and benchmark metadata. Routes samples purely on behavioral divergence:
+2. **Zero-Oracle Consistency Gate**: Blind to ground-truth labels. Benchmark annotations (`answer_info` in BBQ, `target` in StereoSet) are used only to locate the entities to mask and the undetermined option, never to read the answer. Routes samples purely on behavioral divergence:
    - **Factual Consensus** ($P_M == P_U \neq u\_idx$): Identity exposure caused zero deviation $\rightarrow$ Fast Path.
    - **Ambiguous Consensus** ($P_M == P_U == u\_idx$): If the CoT cited explicit factual text quotes, the model fell into the *Cowardly Consensus (Over-refusal)* trap $\rightarrow$ Sent to Tribunal. Otherwise $\rightarrow$ Fast Path.
    - **Discrepancy** ($P_M \neq P_U$): Demographic exposure shifted the model's judgment $\rightarrow$ Sent to Tribunal.
@@ -83,7 +83,9 @@ multi-persona-thinking/
 ├── mpt_evaluate.py                     # Official benchmark evaluation script
 ├── adaptive_mpt_flowchart.drawio       # Visual pipeline flowchart (Draw.io)
 ├── data/                               # Benchmark datasets (BBQ: 11 categories, StereoSet)
-├── scripts/                            # Automation shell scripts (run.sh)
+├── scripts/
+│   ├── run.sh                          # End-to-end inference + evaluation
+│   └── check_masking.py                # Entity masking audit (no GPU needed)
 └── requirements.txt                    # Python dependencies
 ```
 
@@ -148,6 +150,39 @@ python mpt_evaluate.py \
     --note 1 \
     --truncate
 ```
+
+---
+
+## 🎭 Entity Masking
+
+Pass 1 removes identity cues with `mask_entities` (`adaptive_mpt/data.py`):
+
+* **BBQ / BiasFreeBench**
+  - The people in the answer options (from `answer_info`) become `[Person A]`, `[Person B]` in the context, question and options.
+  - The undetermined option is detected by its `unknown` label, so all 10 BBQ phrasings ("Can't answer", "Not known", "Not enough info", ...) are kept intact.
+  - Race_x_SES stores names together with occupations (e.g. `Juan Rodriguez physician`); these are split into `[Person X]` for the name and `[Role X]` for the SES descriptor.
+  - Rows with an empty `answer_info` name (344 in Race_x_gender) recover the name from the option text.
+* **StereoSet**
+  - The `target` is replaced with a category-specific placeholder: `[Person A]` (gender), `[Group A]` (race), `[Religion A]` (religion), `[Profession A]` (profession).
+  - Plurals, possessives and demonyms (race only, e.g. `Bolivia` → `Bolivian`) are covered.
+  - For gender, pronouns become `[Person A]` / `[Person A]'s` and gendered nouns become neutral ones (`mom` → `parent`, `man` → `person`).
+  - Stereotype content inside the options (e.g. "terrorists") is intentionally kept: it is what the benchmark measures.
+
+Audit the masking at any time (no GPU needed):
+
+```bash
+python scripts/check_masking.py --dataset BBQ stereoset BiasFreeBench --examples 3
+```
+
+| Dataset | Undetermined option kept | Context masked | Identity leak |
+| :--- | :---: | :---: | :---: |
+| BBQ (58,492) | 100% | 100% | 0.0% |
+| BiasFreeBench (15,678) | 100% | 100% | 0.0% |
+| StereoSet (12,765) | 100% | 99.9% | 0.0% |
+
+Known residual cues: in StereoSet gender, 5.1% (inter) / 2.2% (intra) of samples still contain "male"/"female", and first names in the options (e.g. "Richard") are not masked.
+
+**Data note**: StereoSet `profession_inter` example 2266 was removed because two of its options are identical and `biased == anti-biased`.
 
 ---
 
