@@ -94,13 +94,18 @@ multi-persona-thinking/
 ## ⚙️ Installation
 
 ```bash
-# Recommended: Python 3.10, 3.11, or 3.12
+# Requires Python 3.10 - 3.13 and an NVIDIA GPU (vllm 0.10.2 does not support Python 3.14)
 conda create -n adaptive_mpt python=3.12 -y
 conda activate adaptive_mpt
 
-# Install dependencies
+# Install dependencies (vllm pulls the matching torch==2.8.0)
 pip install -r requirements.txt
-pip install vllm transformers torch xopen pandas tqdm
+```
+
+Evaluation (`mpt_evaluate.py`) and the masking audit (`scripts/check_masking.py`) do not need a GPU:
+
+```bash
+pip install pandas numpy tqdm xopen
 ```
 
 ---
@@ -127,6 +132,10 @@ If running inside a Kaggle notebook:
 
 ```bash
 %cd /kaggle/working/Adaptive-MPT/multi-persona-thinking
+
+# Kaggle already ships torch, transformers, pandas, numpy and tqdm.
+# Do not install requirements.txt here: its pins conflict with the Kaggle image.
+!pip install -q vllm==0.10.2 xopen
 
 # 2x T4 GPUs (or 1x P100 / A100: set --num_gpus 1)
 !python mpt_inference.py \
