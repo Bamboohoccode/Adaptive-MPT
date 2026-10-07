@@ -133,9 +133,14 @@ If running inside a Kaggle notebook:
 ```bash
 %cd /kaggle/working/Adaptive-MPT/multi-persona-thinking
 
-# Kaggle already ships torch, transformers, pandas, numpy and tqdm.
 # Do not install requirements.txt here: its pins conflict with the Kaggle image.
-!pip install -q vllm==0.10.2 xopen
+# vllm 0.10.2 needs torch 2.8.0, older than the torch Kaggle ships. Remove the
+# preinstalled torch completely first, otherwise leftover files cause
+# "ImportError: cannot import name ... from 'torch._inductor...'".
+!pip uninstall -y vllm torch torchvision torchaudio xformers
+!rm -rf /usr/local/lib/python3.13/dist-packages/torch /usr/local/lib/python3.13/dist-packages/torch-*.dist-info
+!pip install -q vllm==0.10.2 transformers==4.56.0 xopen
+!python -c "import torch, vllm; print(torch.__version__, vllm.__version__)"  # expect 2.8.0+cu128 0.10.2
 
 # 2x T4 GPUs (or 1x P100 / A100: set --num_gpus 1)
 !python mpt_inference.py \
