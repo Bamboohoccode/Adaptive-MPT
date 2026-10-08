@@ -143,7 +143,8 @@ If running inside a Kaggle notebook:
 !python -c "import torch, vllm; print(torch.__version__, vllm.__version__)"  # expect 2.8.0+cu128 0.10.2
 
 # 2x T4 GPUs (or 1x P100 / A100: set --num_gpus 1)
-!python mpt_inference.py \
+# VLLM_USE_V1=0: on T4 the V1 engine falls back to FlexAttention (~5x slower); V0 uses XFormers
+!VLLM_USE_V1=0 python mpt_inference.py \
     --models meta-llama/Llama-3.1-8B-Instruct \
     --dataset BBQ \
     --num_gpus 2 \

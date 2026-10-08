@@ -6,10 +6,15 @@ Router is strictly fixed to Zero-Oracle 'context_sufficiency'.
 """
 
 import argparse
+import os
 import random
 import numpy as np
 import torch
 from pathlib import Path
+
+# T4 (Turing) has no FlashAttention: the V1 engine falls back to the much slower FlexAttention,
+# while V0 uses XFormers. Must be set before vllm is imported.
+os.environ.setdefault("VLLM_USE_V1", "0")
 
 from adaptive_mpt.data import (
     set_tasks_BBQ,
