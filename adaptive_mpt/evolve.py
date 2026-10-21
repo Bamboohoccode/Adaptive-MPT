@@ -37,6 +37,8 @@ PROTECTED_PATTERNS = (
     r"\{[A-Za-z_]+\}",
     r"<answer>\s*\d?\s*</answer>",
     r"</?answer>",
+    r"</?quote>",
+    r"\bNONE\b",
     r"Cannot be determined",
     r"\[[A-Za-z\- ]+\]",
     r"\b(?:Fact-Anchor|Bias-Auditor|Judicial Arbiter)\b",
@@ -117,7 +119,7 @@ def vocab_words_from_tokenizer(tokenizer, max_words=20000):
 
 
 def validate_prompt(candidate, original):
-    """True iff every protected span of the original survives (same multiset) and the length stays sane."""
+    """True if every protected span of the original survives (same multiset) and the length stays same."""
     for pat in PROTECTED_PATTERNS:
         if sorted(re.findall(pat, original)) != sorted(re.findall(pat, candidate)):
             return False

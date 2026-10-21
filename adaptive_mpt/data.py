@@ -62,6 +62,11 @@ STEREOSET_PLACEHOLDERS = {
     "profession": "[Profession A]",
 }
 
+# BBQ categories whose tested attribute is gender: there, pronouns, gendered nouns and gender-identity terms
+# left in the context reveal the identity the masked pass is meant to hide
+GENDER_TESTED_CATEGORIES = {"Gender_identity", "Race_x_gender"}
+GENDER_IDENTITY_TERMS = re.compile(r"\b(?:trans|transgender|cis|cisgender)\b", re.IGNORECASE)
+
 GENDERED_WORDS = {
     "man": "person", "men": "people", "woman": "person", "women": "people",
     "boy": "child", "boys": "children", "girl": "child", "girls": "children",
@@ -91,14 +96,14 @@ def _match_case(word, repl):
 
 def neutralize_gender(text, ph):
     """Replace gendered pronouns with the placeholder and gendered nouns with neutral ones."""
-    text = re.sub(r"\b(?:he|she|him)\b", ph, text, flags=re.IGNORECASE)
-    text = re.sub(r"\b(?:his|hers)\b", f"{ph}'s", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:he|she|him)\b", lambda m: _match_case(m.group(0), ph), text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:his|hers)\b", lambda m: _match_case(m.group(0), f"{ph}'s"), text, flags=re.IGNORECASE)
 
     def her(m):
         nxt = m.group(1)
         if nxt and nxt.lower() not in _HER_OBJECT_FOLLOWERS:
-            return f"{ph}'s {nxt}"
-        return ph + (f" {nxt}" if nxt else "")
+            return _match_case(m.group(0), f"{ph}'s {nxt}")
+        return _match_case(m.group(0), ph + (f" {nxt}" if nxt else ""))
     text = re.sub(r"\bher\b(?:\s+([A-Za-z]+))?", her, text, flags=re.IGNORECASE)
 
     pattern = re.compile(r"\b(" + "|".join(map(re.escape, GENDERED_WORDS)) + r")\b", re.IGNORECASE)
@@ -144,7 +149,8 @@ def mask_entities(item):
     """Anonymize character identities for objective logic checks.
 
     - BBQ: Masks the people in the answer options into [Person A], [Person B], and SES descriptors
-      that are stored together with names (Race_x_SES) into [Role A], [Role B].
+      that are stored together with names (Race_x_SES) into [Role A], [Role B]. In categories that test
+      gender (GENDER_TESTED_CATEGORIES) also neutralizes pronouns, gendered nouns and trans/cis terms.
     - StereoSet: Masks the target with a category-specific placeholder; for gender also neutralizes
       gendered pronouns and nouns in the context and options.
     """
@@ -181,6 +187,9 @@ def mask_entities(item):
             name_map.setdefault(role, f"[Role {chr(65 + idx)}]")
         # Longest first so "Juan Rodriguez" is replaced before a shorter overlapping string
         name_map = dict(sorted(name_map.items(), key=lambda kv: -len(kv[0])))
+        # "this person" instead of a placeholder: a pronoun's referent is not known, and it keeps verbs agreeing
+        if str(item.get("category", "")) in GENDER_TESTED_CATEGORIES:
+            neutralize = lambda text: GENDER_IDENTITY_TERMS.sub("[Trait]", neutralize_gender(text, "this person"))
 
     elif "target" in item and item["target"]:
         target = str(item["target"]).strip()
@@ -219,6 +228,84 @@ def mask_entities(item):
             masked_item[opt_key] = mask_text(masked_item[opt_key])
 
     return masked_item
+
+def _gender_of(label):
+    """F / M from a BBQ answer_info label ("F", "M-Black", "trans_F"), else None."""
+    label = str(label)
+    if label in ("F", "M") or label.startswith(("F-", "M-")):
+        return label[0]
+    if label.endswith(("_F", "_M")):
+        return label[-1]
+    return None
+
+_PRONOUN_SWAP = {"he": "she", "she": "he", "him": "her", "his": "her", "hers": "his",
+                 "himself": "herself", "herself": "himself"}
+
+def _swap_pronouns(text):
+    """he <-> she etc. in one pass; "her" becomes "his" before a noun, otherwise "him"."""
+    def repl(m):
+        word, nxt = m.group(1), m.group(2)
+        if word.lower() == "her":
+            new = "his" if nxt and nxt.lower() not in _HER_OBJECT_FOLLOWERS else "him"
+        else:
+            new = _PRONOUN_SWAP[word.lower()]
+        return _match_case(word, new)
+    return re.sub(r"\b(he|she|him|his|hers|himself|herself|her)\b(?=(?:\s+([A-Za-z]+))?)", repl, text,
+                  flags=re.IGNORECASE)
+
+def _swap_substitute(text, swap_map, suffix=r"'s|s|es"):
+    """Exchange names in one pass (so a swap never swaps back), keeping plural/possessive suffixes
+    and fixing a/an before the new name ("an elderly woman" -> "a high school student")."""
+    lookup = {name.lower(): other for name, other in swap_map.items()}
+    alternatives = "|".join(re.escape(name) for name in sorted(swap_map, key=len, reverse=True))
+    pattern = re.compile(rf"\b(?:(an?)\s+)?({alternatives})({suffix})?\b", re.IGNORECASE)
+
+    def repl(m):
+        article, name, suf = m.group(1), m.group(2), m.group(3) or ""
+        new = _match_case(name, lookup[name.lower()])
+        if article:
+            an = re.match(r"[aeiou]|8|1[18](?!\d)", new, re.IGNORECASE) is not None
+            article = _match_case(article, "an" if an else "a")
+            return f"{article} {new}{suf}"
+        return new + suf
+    return pattern.sub(repl, text)
+
+def swap_entities(item):
+    """Counterfactual copy of a BBQ / BiasFreeBench item with the two people's identities exchanged.
+
+    Names (and Race_x_SES roles) are swapped in the context and question; the options keep their order,
+    so an answer grounded in the text moves to the other person's option while a group-driven answer stays.
+    Returns (swapped_item, index_map) where index_map maps an original prediction to the expected swapped one,
+    or (None, None) when neither two names nor two roles of the people appear in the context.
+    """
+    ans_info = item.get("answer_info", {})
+    u = get_undetermined_index(item)
+    if not ans_info or u < 0:
+        return None, None
+    entity_map = mask_entities(item)["_entity_map"]
+    context = str(item.get("context", ""))
+    persons = sorted((n for n, ph in entity_map.items() if ph.startswith("[Person")), key=lambda n: entity_map[n])
+    roles = sorted((n for n, ph in entity_map.items() if ph.startswith("[Role")), key=lambda n: entity_map[n])
+    # Race_x_SES can have one shared name ("Black") and two SES roles: then only the roles tell the people apart
+    swap_map = {}
+    for pair in (persons, roles):
+        if len(pair) == 2 and all(_contains(context, p) for p in pair):
+            swap_map.update({pair[0]: pair[1], pair[1]: pair[0]})
+    if not swap_map:
+        return None, None
+    person_idx = [k for k in range(3) if k != u]
+    genders = {_gender_of(ans_info[f"ans{k}"][1]) for k in person_idx}
+    swap_gender = genders == {"F", "M"}
+
+    def swap_text(text):
+        text = _swap_substitute(str(text), swap_map)
+        return _swap_pronouns(text) if swap_gender else text
+
+    swapped = dict(item)
+    swapped["context"] = swap_text(item.get("context", ""))
+    swapped["question"] = swap_text(item.get("question", ""))
+    index_map = {u: u, person_idx[0]: person_idx[1], person_idx[1]: person_idx[0], -1: -1}
+    return swapped, index_map
 
 def get_undetermined_index(item):
     """Identify the choice index corresponding to 'Cannot be determined'."""
@@ -355,6 +442,10 @@ def save_dataset_records(sample_records, category_manifest):
             line.pop('_output_file', None)
             line.pop('_ce_scores', None)
             line.pop('_ce_labels', None)
+            # Keep the gate's inputs (masked/swapped answers, quote checks, route) so routing can be audited offline
+            screen = line.pop('_screen', None)
+            if screen is not None:
+                line['screening'] = screen
 
         with xopen(output_file, "w", encoding="utf-8") as fout:
             for line in task_records:

@@ -229,7 +229,10 @@ Known residual cues: in StereoSet gender, 5.1% (inter) / 2.2% (intra) of samples
 | `--num_rounds` | int | `2` | Number of Tribunal debate rounds |
 | `--note` | str | `1` | Subfolder name under `predictions/` |
 | `--overwrite` | flag | `False` | Overwrite existing prediction JSONL files |
-| `--cot_guard` | flag | `False` | Optional CoT keyword scanning to rescue over-refusal in Pass 2 |
+| `--cot_guard` | flag | `False` | Optional CoT keyword scanning to rescue over-refusal in Pass 2 (only with `--no_quote_gate`) |
+| `--no_quote_gate` | flag | `False` | Disable the verbatim-quote check in the consistency gate |
+| `--no_swap_pass` | flag | `False` | Disable the identity-swapped screening pass |
+| `--legacy_tribunal` | flag | `False` | Use the old tribunal (judge debates; unlabelled replies) |
 | `--data_split` | float float | `None` | Split dataset by fraction and part index (e.g. `0.5 1` for 1st half, `0.5 2` for 2nd half) |
 | `--router_method`| str | `context_sufficiency` | Fixed to `context_sufficiency` (Dual-Pass) |
 

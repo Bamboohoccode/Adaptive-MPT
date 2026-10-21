@@ -136,6 +136,27 @@ def format_prompt(args, usr_prompt, sys_prompt=None, thinking_history=None, id=0
         formatted_prompt.extend([{"role": "user", "content": usr_prompt}])
         return formatted_prompt
 
+def format_messages(args, messages, sys_prompt):
+    """Render a system prompt plus an alternating user/assistant message list for the configured backend.
+
+    Unlike format_prompt, the caller controls every turn, so other agents' arguments can go in a user turn
+    and only an agent's own replies appear as assistant turns.
+    """
+    model_name = args.models[0]
+    if args.inference_type == "vllm" and not args.chat_templates:
+        if model_name.startswith("meta-llama"):
+            headers, end, parts = {"system": SYS_LLAMA3, "user": USR_LLAMA3, "assistant": AST_LLAMA3}, END_LLAMA3, [BEG_LLAMA3]
+        elif model_name.startswith("Qwen"):
+            headers, end, parts = {"system": SYS_QWEN, "user": USR_QWEN, "assistant": AST_QWEN}, END_QWEN, []
+        else:
+            return "\n".join([sys_prompt] + [m["content"] for m in messages])
+        parts.extend([headers["system"], sys_prompt, end])
+        for m in messages:
+            parts.extend([headers[m["role"]], m["content"], end])
+        parts.append(headers["assistant"])
+        return "\n".join(parts)
+    return [{"role": "system", "content": sys_prompt}] + list(messages)
+
 def decode_batch(models, args, formatted_prompts, **kwargs):
     """Unified decode for both vllm and openai backends."""
     global TOTAL_LLM_CALLS

@@ -75,7 +75,13 @@ def parse_arguments():
     parser.add_argument("--fast_path_method", type=str, default="logical", help="Fast path strategy")
     parser.add_argument("--asymmetric", action="store_true", default=True, help="Asymmetric Tribunal mode (fixed)")
     parser.add_argument("--cot_guard", "--over_refusal_guard", action="store_true", default=False,
-                        help="Optional CoT keyword scanning to rescue potential over-refusal in Pass 2")
+                        help="Optional CoT keyword scanning to rescue potential over-refusal in Pass 2 (only with --no_quote_gate)")
+    parser.add_argument("--no_quote_gate", dest="quote_gate", action="store_false",
+                        help="Disable the verbatim-quote check in the consistency gate (restores the old routing)")
+    parser.add_argument("--no_swap_pass", dest="swap_pass", action="store_false",
+                        help="Disable the identity-swapped screening pass")
+    parser.add_argument("--legacy_tribunal", action="store_true",
+                        help="Use the old tribunal (judge debates; unlabelled replies in one assistant turn)")
     parser.add_argument("--data_split", "--data_part", "--subset_split", type=float, nargs=2, default=None,
                         metavar=("RATIO", "PART"),
                         help="Split dataset by fraction and part index (e.g., --data_split 0.5 1 for 1st half, 0.5 2 for 2nd half)")
