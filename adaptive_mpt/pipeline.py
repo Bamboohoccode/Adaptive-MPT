@@ -1,12 +1,12 @@
+import json
 import re
+from pathlib import Path
 from adaptive_mpt.prompts import (
     DEFAULT_SYS_PROMPT,
     QUESTION_PROMPT_BBQ,
     QUESTION_PROMPT_STEREOSET,
     CONSTRAINT_PROMPT_BBQ,
     CONSTRAINT_PROMPT_STS,
-    DEBIAS_PROMPT,
-    UNCERTAINTY_WARNING,
     POSTFIX_PROMPT,
     LOGICAL_PROMPT,
     REPROMPT,
@@ -19,6 +19,10 @@ from adaptive_mpt.prompts import (
     REVIEW_PROMPT_FACT_EXTRACTION,
     SUMMARY_PROMPT_FACT_EXTRACTION,
     LOGICAL_PROMPT_ASYMMETRIC_UNMASKED,
+    FEW_SHOT_UNMASKED_DISAMBIG,
+    FEW_SHOT_UNMASKED_AMBIG,
+    FEW_SHOT_MASKED_DISAMBIG,
+    FEW_SHOT_MASKED_AMBIG,
     FACT_ANCHOR_SYS_PROMPT,
     BIAS_AUDITOR_SYS_PROMPT,
     JUDGE_PERSONA_SYS_PROMPT,
@@ -95,12 +99,115 @@ def valid_quote(resp, item, entity_map, masked=False):
     names += [_norm(ph if masked else name) for name, ph in entity_map.items()]
     return len(q.split()) >= 4 and q in _norm(item["context"]) and any(n and n in q for n in names)
 
+FEW_SHOT_DATASETS = ("BBQ", "BiasFreeBench", "biasfreebench")
+
+def _permute_options(item, new_pos):
+    """Copy of a BBQ-style item with options moved: new_pos maps old option index -> new index."""
+    out = dict(item)
+    order = sorted(new_pos, key=new_pos.get)
+    for old in order:
+        out[f"ans{new_pos[old]}"] = item[f"ans{old}"]
+    out["answer_info"] = {f"ans{new_pos[old]}": item["answer_info"][f"ans{old}"] for old in order}
+    out["label"] = new_pos[item["label"]]
+    return out
+
+def _deciding_sentence(item, ambig_context, entity_map, masked):
+    """First sentence of the disambiguating text that valid_quote accepts, or None."""
+    context = item["context"]
+    addition = context[len(ambig_context):] if context.startswith(ambig_context) else context
+    for sent in re.split(r"(?<=[.!?])\s+", addition.strip()):
+        if valid_quote(f"<quote>{sent}</quote>", item, entity_map, masked=masked):
+            return sent
+    return None
+
+def _demo_response(item, quote, masked):
+    """Worked answer for one few-shot example, from the FEW_SHOT_* templates in prompts.py."""
+    label = item["label"]
+    u = get_undetermined_index(item)
+    people = [re.sub(r"^The ", "the ", str(item[f"ans{k}"]).strip()) for k in range(3) if k != u]
+    if masked:
+        template = FEW_SHOT_MASKED_DISAMBIG if quote else FEW_SHOT_MASKED_AMBIG
+    else:
+        template = FEW_SHOT_UNMASKED_DISAMBIG if quote else FEW_SHOT_UNMASKED_AMBIG
+    return template.format(question=str(item["question"]).strip(), people=" and ".join(people), quote=quote,
+                           label=label, option=item[f"ans{label}"])
+
+def build_few_shot_demos(args):
+    """--few_shot K worked examples for the screening passes, from --few_shot_dir (default data/synthetic_bbq).
+
+    Demo i is disambiguated when i is even and ambiguous when odd, alternates neg/nonneg questions, cycles through
+    categories, and has its options permuted so the correct answer sits at position i % 3 (the synthetic files always
+    put "unknown" last). Each demo exists in an unmasked form (used by the unmasked AND the swapped pass, so the swap
+    test compares prompts that differ only in the question's identities) and a masked form (used by the masked pass).
+    Returns {"unmasked": [(item, response)], "masked": [(item, response)]}, or None when few-shot is off.
+    """
+    k = getattr(args, "few_shot", 0)
+    if k <= 0 or args.dataset not in FEW_SHOT_DATASETS:
+        return None
+    cached = getattr(args, "_few_shot_demos", None)
+    if cached is not None:
+        return cached
+
+    files = sorted(Path(getattr(args, "few_shot_dir", "data/synthetic_bbq")).glob("*.jsonl"))
+    groups = []
+    for path in files:
+        rows = [json.loads(line) for line in open(path, encoding="utf-8")]
+        groups.append([rows[j:j + 4] for j in range(0, len(rows) - 3, 4)])
+    demos, used = {"unmasked": [], "masked": []}, set()
+    for i in range(k):
+        disambig, polarity, target = i % 2 == 0, ("neg" if (i // 2) % 2 == 0 else "nonneg"), i % 3
+        found = False
+        for f in range(len(files)):
+            fi = (i + f) % len(files)
+            for gi, group in enumerate(groups[fi]):
+                pick = [r for r in group if r["question_polarity"] == polarity]
+                row = next((r for r in pick if r["context_condition"] == ("disambig" if disambig else "ambig")), None)
+                ambig = next((r for r in pick if r["context_condition"] == "ambig"), None)
+                if row is None or ambig is None or (fi, gi, polarity, disambig) in used:
+                    continue
+                others = [o for o in range(3) if o != row["label"]]
+                new_pos = dict(zip([row["label"]] + others, [target] + [n for n in range(3) if n != target]))
+                item, ambig_item = _permute_options(row, new_pos), _permute_options(ambig, new_pos)
+                masked_item, masked_ambig = mask_entities(item), mask_entities(ambig_item)
+                entity_map = masked_item["_entity_map"]
+                quote_u = quote_m = None
+                if disambig:
+                    quote_u = _deciding_sentence(item, ambig_item["context"], entity_map, masked=False)
+                    quote_m = _deciding_sentence(masked_item, masked_ambig["context"], entity_map, masked=True)
+                    if not (quote_u and quote_m):
+                        continue
+                demos["unmasked"].append((item, _demo_response(item, quote_u, masked=False)))
+                demos["masked"].append((masked_item, _demo_response(masked_item, quote_m, masked=True)))
+                used.add((fi, gi, polarity, disambig))
+                found = True
+                break
+            if found:
+                break
+        if not found:
+            raise ValueError(f"--few_shot {k}: no usable example left for demo {i + 1} in {files[0].parent if files else 'few_shot_dir'}")
+    print(f"Few-shot: {k} demos, correct options at " + ", ".join(str(it["label"]) for it, _ in demos["unmasked"]))
+    args._few_shot_demos = demos
+    return demos
+
+def _screen_prompt(args, item, masked, demos):
+    """Screening prompt; with demos, each demo is a user turn plus a worked assistant turn before the real question."""
+    prompt = build_prompt(args, item, is_init=True, logical=True, masked=masked)
+    if not demos:
+        return format_prompt(args, prompt, sys_prompt=DEFAULT_SYS_PROMPT)
+    messages = []
+    for demo_item, demo_response in demos["masked" if masked else "unmasked"]:
+        messages.append({"role": "user", "content": build_prompt(args, demo_item, is_init=True, logical=True, masked=masked)})
+        messages.append({"role": "assistant", "content": demo_response})
+    messages.append({"role": "user", "content": prompt})
+    return format_messages(args, messages, DEFAULT_SYS_PROMPT)
+
 def run_dual_pass_screening(args, models, sample_records):
     """Component 1: Counterfactual Batch Inference (masked, unmasked and identity-swapped passes in one batch).
 
     Pass 1 (Masked Logic): [Person A], [Person B] with LOGICAL_PROMPT_MASKED -> P_M
     Pass 2 (Unmasked CoT): Original identities with LOGICAL_PROMPT_ASYMMETRIC_UNMASKED -> P_U, R_U
     Pass 3 (Swapped, unless --no_swap_pass): the two people's identities exchanged -> P_S, expected index_map[P_U]
+    With --few_shot K, all three passes get the same K worked examples (masked ones for the masked pass).
     Per-sample screening details (predictions, quote checks, raw masked/swapped responses) go to record["_screen"].
     """
     total_samples = len(sample_records)
@@ -109,21 +216,18 @@ def run_dual_pass_screening(args, models, sample_records):
 
     counterfactual_masked_inputs = [mask_entities(it) for it in sample_records]
     swaps = [swap_entities(it) if swap_enabled else (None, None) for it in sample_records]
+    demos = build_few_shot_demos(args)
 
     masked_prompts = []
     unmasked_prompts = []
     swap_prompts, swap_owners = [], []
     for i in range(total_samples):
-        p_m = build_prompt(args, counterfactual_masked_inputs[i], is_init=True, logical=True, masked=True)
-        masked_prompts.append(format_prompt(args, p_m, sys_prompt=DEFAULT_SYS_PROMPT))
-
-        p_u = build_prompt(args, sample_records[i], is_init=True, logical=True, masked=False)
-        unmasked_prompts.append(format_prompt(args, p_u, sys_prompt=DEFAULT_SYS_PROMPT))
+        masked_prompts.append(_screen_prompt(args, counterfactual_masked_inputs[i], True, demos))
+        unmasked_prompts.append(_screen_prompt(args, sample_records[i], False, demos))
 
         swapped, _ = swaps[i]
         if swapped is not None:
-            p_s = build_prompt(args, swapped, is_init=True, logical=True, masked=False)
-            swap_prompts.append(format_prompt(args, p_s, sys_prompt=DEFAULT_SYS_PROMPT))
+            swap_prompts.append(_screen_prompt(args, swapped, False, demos))
             swap_owners.append(i)
 
     # Single unified batch execution on vLLM
@@ -310,26 +414,35 @@ def execute_asymmetric_tribunal(args, models, tribunal_indices, sample_records, 
     replies = [[[] for _ in range(args.num_rounds + 1)] for _ in range(num_samples)]
     vote_trace = [[[] for _ in range(args.num_rounds + 1)] for _ in range(num_samples)]
 
+    active = list(range(num_samples))
     for round_idx in range(args.num_rounds + 1):
+        if not active:
+            break
         # Agents in a round only see earlier rounds, so the whole round is one batch
         prompts = [
             format_messages(args, _debater_messages(round_prompts[j], replies[j], round_idx, a), sys_prompt)
             for a, (_, sys_prompt) in enumerate(TRIBUNAL_DEBATERS)
-            for j in range(num_samples)
+            for j in active
         ]
         responses = decode_batch(models, args, prompts, phase=f"tribunal_r{round_idx}")
         for a in range(num_agents):
-            for j in range(num_samples):
-                resp = responses[a * num_samples + j]
+            for k, j in enumerate(active):
+                resp = responses[a * len(active) + k]
                 replies[j][round_idx].append(resp)
                 vote_trace[j][round_idx].append([get_pred(resp)])
+        # Fast convergence: both debaters give the same parseable answer, so further rounds add nothing (judge still rules)
+        converged = {j for j in active if (p := [v[0] for v in vote_trace[j][round_idx]])[0] != -1 and len(set(p)) == 1}
+        active = [j for j in active if j not in converged]
+    for j in range(num_samples):
+        replies[j] = [r for r in replies[j] if r]
+        vote_trace[j] = [v for v in vote_trace[j] if v]
 
     names = [name for name, _ in TRIBUNAL_DEBATERS]
     judge_prompts = []
     for j, item in enumerate(items):
         transcript = "\n\n".join(
             f"Round {r + 1}\n" + "\n\n".join(f"{names[a]}:\n{replies[j][r][a]}" for a in range(num_agents))
-            for r in range(args.num_rounds + 1)
+            for r in range(len(replies[j]))
         )
         parts = [task_prompt(args, item), "Panel debate:\n\n" + transcript]
         exhibit = _identity_blind_exhibit(item, item.get("_screen", {}))
@@ -363,12 +476,15 @@ def _execute_legacy_tribunal(args, models, tribunal_indices, sample_records, exp
     tribunal_transcript = [[[] for _ in range(args.num_rounds + 1)] for _ in range(num_samples)]
 
     # Multi-round adversarial debate
+    active = list(range(num_samples))
     for round_idx in range(args.num_rounds + 1):
-        round_responses = [[] for _ in range(num_samples)]
+        if not active:
+            break
+        round_responses = {j: [] for j in active}
 
         for agent_id in range(max_agents):
             formatted_prompts = []
-            for j in range(num_samples):
+            for j in active:
                 i = tribunal_indices[j]
                 is_init = (round_idx == 0)
                 item = sample_records[i]
@@ -384,16 +500,20 @@ def _execute_legacy_tribunal(args, models, tribunal_indices, sample_records, exp
                     id=agent_id,
                 ))
 
-            if formatted_prompts:
-                responses = decode_batch(models, args, formatted_prompts, phase=f"tribunal_r{round_idx}_a{agent_id}")
-                for j in range(num_samples):
-                    resp = responses[j]
-                    pred = get_pred(resp)
-                    tribunal_vote_trace[j][round_idx].append([pred])
-                    round_responses[j].append(resp)
+            responses = decode_batch(models, args, formatted_prompts, phase=f"tribunal_r{round_idx}_a{agent_id}")
+            for k, j in enumerate(active):
+                resp = responses[k]
+                tribunal_vote_trace[j][round_idx].append([get_pred(resp)])
+                round_responses[j].append(resp)
 
-        for j in range(num_samples):
+        for j in active:
             tribunal_transcript[j][round_idx].extend(round_responses[j])
+        # Fast convergence: all agents give the same parseable answer, so further rounds add nothing (judge still rules)
+        active = [j for j in active
+                  if (p := [v[0] for v in tribunal_vote_trace[j][round_idx]])[0] == -1 or len(set(p)) > 1]
+    for j in range(num_samples):
+        tribunal_transcript[j] = [r for r in tribunal_transcript[j] if r]
+        tribunal_vote_trace[j] = [v for v in tribunal_vote_trace[j] if v]
 
     # Judicial Arbiter final synthesis verdict
     judge_synthesis_prompts = []

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Evolve Adaptive-MPT prompts on Synthetic-BBQ (see adaptive_mpt/evolve.py).
+"""Evolve Adaptive-MPT prompts with GEPA on BiasFreeBench groups (see adaptive_mpt/evolve.py).
 
-    python scripts/gen_synthetic_bbq.py                       # 1. build data/synthetic_bbq/
-    python mpt_evolve.py --models Qwen/Qwen2.5-7B-Instruct    # 2. evolve (resumable with --resume)
+    python scripts/gen_disambig_bfb.py                        # 1. build data/bfb_evolve/ (needs `agy`)
+    OPENROUTER_API_KEY=... python mpt_evolve.py --models Qwen/Qwen2.5-7B-Instruct   # 2. evolve (resumable with --resume)
     python mpt_evolve.py --apply evolved/<run>/best_prompts.json   # 3. overwrite adaptive_mpt/prompts.py (backup kept)
 """
 import argparse
@@ -20,23 +20,23 @@ from adaptive_mpt import evolve as ev
 
 
 def parse_arguments():
-    p = argparse.ArgumentParser(description="Evolutionary prompt optimisation on Synthetic-BBQ")
+    p = argparse.ArgumentParser(description="GEPA prompt evolution on BiasFreeBench groups")
     # data / output
-    p.add_argument("--data_dir", default="data/synthetic_bbq")
+    p.add_argument("--data_dir", default="data/bfb_evolve")
     p.add_argument("--out_dir", default="evolved/run1")
     p.add_argument("--categories", nargs="*", default=None, help="restrict to some categories")
     # evolution
     p.add_argument("--genes", nargs="+", default=list(ev.DEFAULT_GENES),
                    help=f"prompt constants to evolve; also possible: {', '.join(ev.OPTIONAL_GENES)}")
     p.add_argument("--generations", type=int, default=10)
-    p.add_argument("--mut_prob", type=float, default=0.5, help="probability that a gene is mutated in a round")
-    p.add_argument("--mutation_mode", choices=["word", "token"], default="word",
-                   help="word: swap an unprotected word with a prompt-lexicon word; token: tokenizer-level swap")
-    p.add_argument("--tokenizer", default=None, help="tokenizer for --mutation_mode token (default: first --models)")
+    p.add_argument("--minibatch_groups", type=int, default=10, help="random 4-row groups of one category per iteration")
+    p.add_argument("--val_groups", type=int, default=5, help="validation (Pareto) groups per category")
+    p.add_argument("--select_groups", type=int, default=10, help="held-out Select groups per category")
+    p.add_argument("--merge_every", type=int, default=5, help="gene-wise merge of two frontier candidates every K iterations (0 = off)")
+    p.add_argument("--budget_calls", type=int, default=0, help="stop after this many pipeline LLM calls (0 = only --generations)")
+    p.add_argument("--reflector_model", default="deepseek/deepseek-v4-flash", help="OpenRouter model id that rewrites prompts")
     p.add_argument("--lam", type=float, default=1.0, help="fitness = acc_avg - lam * diff_bias_avg")
-    p.add_argument("--margin", type=float, default=0.005, help="child must beat the other individual by more than this")
-    p.add_argument("--screen_groups", type=int, default=8, help="4-row groups used for the cheap screening pass")
-    p.add_argument("--screen_margin", type=float, default=0.03)
+    p.add_argument("--margin", type=float, default=0.005, help="child must beat its parent on the minibatch by more than this")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--resume", action="store_true")
     p.add_argument("--apply", default=None, metavar="BEST_PROMPTS_JSON",
@@ -120,35 +120,26 @@ def main():
     if unknown:
         raise SystemExit(f"unknown genes: {unknown}")
 
-    evolve_records = ev.load_synthetic_records(args.data_dir, "evolve", args.categories)
-    select_records = ev.load_synthetic_records(args.data_dir, "select", args.categories)
-    print(f"Evolve set: {len(evolve_records)} rows | Select set: {len(select_records)} rows")
-
-    originals = [getattr(prompts_module, g) for g in args.genes]
-    if args.mutation_mode == "token":
-        from transformers import AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer or args.models[0])
-        vocab_words = ev.vocab_words_from_tokenizer(tokenizer)
-        mutate_fn = lambda text, orig: ev.mutate(text, orig, rng, "token", tokenizer=tokenizer, vocab_words=vocab_words)  # noqa: E731
-    else:
-        lexicon = ev.build_lexicon(originals)
-        mutate_fn = lambda text, orig: ev.mutate(text, orig, rng, "word", lexicon=lexicon)  # noqa: E731
+    groups = ev.load_groups(args.data_dir, args.categories)
+    evolve_groups, val_groups, select_groups = ev.split_groups(groups, args.val_groups, args.select_groups, args.seed)
+    val_rows, select_records = ev.flatten(val_groups), ev.flatten(select_groups)
+    print(f"Categories: {sorted(groups)} | validation: {len(val_rows)} rows | Select: {len(select_records)} rows")
 
     state = ev.EvolutionState(out_dir)
     if args.resume and not state.load():
         print("--resume given but no state.json found: starting fresh")
-    rng = random.Random(args.seed * 1000 + state.data["round"])
 
     models = [LLMDecoder(args, m) for m in args.models]
     evaluator = ev.Evaluator(args, models, cache=state.data["cache"], lam=args.lam)
+    reflect = ev.make_reflector(args.reflector_model)
 
-    state = ev.evolve(args, evaluator, evolve_records, out_dir, args.genes, rng, mutate_fn, state)
+    state = ev.evolve(args, evaluator, evolve_groups, val_rows, out_dir, args.genes, reflect, state)
 
     # Final: pick the best individual per gene and compare with the original prompts on the held-out Select set.
-    best = ev.active_overrides(state.data["genes"])
+    best = ev.best_overrides(state)
     baseline = {g: getattr(prompts_module, g) for g in args.genes}
-    m_base = evaluator.metrics(baseline, select_records, "select")
-    m_best = evaluator.metrics(best, select_records, "select")
+    m_base = evaluator.run(baseline, select_records, "select")["metrics"]
+    m_best = evaluator.run(best, select_records, "select")["metrics"]
     ev.plot_select_summary(m_base, m_best, out_dir / "plots")
     (out_dir / "best_prompts.json").write_text(json.dumps(best, ensure_ascii=False, indent=2))
     (out_dir / "select_metrics.json").write_text(json.dumps({"baseline": m_base, "evolved": m_best}, indent=2))

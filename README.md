@@ -2,69 +2,68 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![Engine: vLLM](https://img.shields.io/badge/engine-vLLM-green.svg)](https://github.com/vllm-project/vllm)
-[![Zero-Oracle](https://img.shields.io/badge/architecture-Zero--Oracle-brightgreen.svg)]()
 [![Benchmark: BBQ](https://img.shields.io/badge/benchmark-BBQ-orange.svg)]()
 
 Adaptive-MPT is an efficient, debiasing multi-agent reasoning framework designed to overcome the **Cowardly Consensus (Over-refusal)** trap in Large Language Models without sacrificing factual accuracy ($acc_d$).
 
-By decoupling factual consistency from demographic identity via a **Zero-Oracle Dual-Pass Screening** (fixed to `context_sufficiency`) and dispatching discrepant cases to an **Asymmetric Persona Tribunal**, Adaptive-MPT achieves high factual fidelity, eliminates demographic bias, and routes ~80.9% of benign queries through a **0-compute Fast Path**.
+By decoupling factual consistency from demographic identity via a **Counterfactual Dual-Pass Screening** and dispatching discrepant cases to an **Asymmetric Persona Tribunal**, Adaptive-MPT achieves high factual fidelity, reduces demographic bias, and routes most benign queries through a **0-compute Fast Path**.
 
 ---
 
 ## 🏛️ Pipeline Architecture
 
+Full diagrams (inference pipeline + prompt evolution): [adaptive_mpt_flowchart.drawio](adaptive_mpt_flowchart.drawio).
+
 ```mermaid
 flowchart TD
-    classDef inputStyle fill:#1e293b,stroke:#475569,stroke-width:2px,color:#f8fafc;
-    classDef passStyle fill:#0f172a,stroke:#0284c7,stroke-width:2px,color:#f8fafc;
-    classDef gateStyle fill:#312e81,stroke:#6366f1,stroke-width:2px,color:#f8fafc;
-    classDef fastStyle fill:#064e3b,stroke:#10b981,stroke-width:2px,color:#f8fafc;
-    classDef adaptStyle fill:#4c1d95,stroke:#a855f7,stroke-width:2px,color:#f8fafc;
-    classDef judgeStyle fill:#78350f,stroke:#f59e0b,stroke-width:2px,color:#f8fafc;
+    In["Input (Context, Question, Options)"]
 
-    In["Input Query (Context, Question, Options)"]:::inputStyle
-
-    subgraph S1 ["Component 1: Dual-Pass Screening (Unified 2N Batch)"]
-        In --> PassM["Pass 1: Masked Entity<br/>[Person A], [Person B]<br/>+ LOGICAL_PROMPT_MASKED<br/>&rarr; P_M (Objective Logic)"]:::passStyle
-        In --> PassU["Pass 2: Unmasked Identity<br/>Original Demographics<br/>+ ASYMMETRIC_UNMASKED<br/>&rarr; P_U, R_U (Self-Auditing CoT)"]:::passStyle
+    subgraph S1 ["Component 1: Counterfactual Screening (one batch)"]
+        In --> PassM["Pass 1 Masked: [Person A]/[Person B]<br/>LOGICAL_PROMPT_MASKED -> P_M, quote_M"]
+        In --> PassU["Pass 2 Unmasked: original identities<br/>ASYMMETRIC_UNMASKED -> P_U, R_U"]
+        In --> PassS["Pass 3 Swapped: identities exchanged<br/>-> P_S (expected: follows the person)"]
     end
 
-    PassM & PassU --> Gate{"Component 2: Zero-Oracle Gate<br/>P_M == P_U ?"}:::gateStyle
+    PassM & PassU & PassS --> Gate{"Component 2: Consistency Gate"}
 
-    subgraph S2 ["Component 3: Fast Path (System 1)"]
-        Gate -- "Consistent & Safe<br/>(P_M == P_U != u_idx)" --> FP["Direct Turn 1 Cache Output<br/>0 Compute Overhead<br/>(~80.9% of queries)"]:::fastStyle
-        Gate -- "Ambiguous Consensus<br/>(P_M == P_U == u_idx)" --> CheckRefusal{"Over-refusal Check:<br/>Factual quote cited in R_U?"}:::gateStyle
-        CheckRefusal -- "No Quote (Genuine Ambiguity)" --> FP
+    Gate -- "all checks pass" --> FP["Component 3: Fast Path<br/>cached Pass-2 answer, 0 extra calls"]
+    Gate -- "any check fails" --> T
+
+    subgraph S4 ["Component 4: Asymmetric Persona Tribunal"]
+        T["Fact-Anchor vs Bias-Auditor<br/>num_rounds + 1 debate rounds"] --> Judge["Judicial Arbiter<br/>rules once, sees masked/swap evidence<br/>-> answer"]
     end
 
-    subgraph S3 ["Component 4: Asymmetric Persona Tribunal (System 2)"]
-        Gate -- "Discrepancy (P_M != P_U)<br/>Demographics altered decision" --> Tribunal["Initialize 3-Role Tribunal"]:::adaptStyle
-        CheckRefusal -- "Yes Quote (Over-refusal trap)" --> Tribunal
-
-        Tribunal --> P1["Fact-Anchor Persona<br/>'Demands explicit literal text quotes;<br/>facts are never bias'"]:::adaptStyle
-        Tribunal --> P2["Bias-Auditor Persona<br/>'Audits for demographic prejudice;<br/>challenges ungrounded leaps'"]:::adaptStyle
-        P1 & P2 --> Debate["Adversarial Discourse Rounds"]:::adaptStyle
-        Debate --> Judge["Judicial Arbiter<br/>Impartially weighs quotes vs objections<br/>Produces final <answer> verdict"]:::judgeStyle
-    end
-
-    FP --> Out["Final Prediction"]:::inputStyle
+    FP --> Out["Final Prediction"]
     Judge --> Out
 ```
 
 ### The 4 Core Components
 
-1. **Dual-Pass Batch Screening**: Evaluates each query twice in a single $2N$ batch on vLLM:
-   - **Pass 1 (Masked Logic)**: Anonymizes character identities to `[Person A]`, `[Person B]` with `LOGICAL_PROMPT_MASKED` (zero mention of bias) to establish objective ground-truth reasoning ($P_M$). See [Entity Masking](#-entity-masking) for the exact rules.
-   - **Pass 2 (Unmasked CoT)**: Keeps original demographic identities with `LOGICAL_PROMPT_ASYMMETRIC_UNMASKED` to elicit self-audited reasoning ($P_U, R_U$).
-2. **Zero-Oracle Consistency Gate**: Blind to ground-truth labels. Benchmark annotations (`answer_info` in BBQ, `target` in StereoSet) are used only to locate the entities to mask and the undetermined option, never to read the answer. Routes samples purely on behavioral divergence:
-   - **Factual Consensus** ($P_M == P_U \neq u\_idx$): Identity exposure caused zero deviation $\rightarrow$ Fast Path.
-   - **Ambiguous Consensus** ($P_M == P_U == u\_idx$): If the CoT cited explicit factual text quotes, the model fell into the *Cowardly Consensus (Over-refusal)* trap $\rightarrow$ Sent to Tribunal. Otherwise $\rightarrow$ Fast Path.
-   - **Discrepancy** ($P_M \neq P_U$): Demographic exposure shifted the model's judgment $\rightarrow$ Sent to Tribunal.
-3. **Fast Path (System 1)**: Returns the cached unmasked Turn 1 prediction directly with **0 compute overhead** and no duplicate generation calls.
-4. **Asymmetric Persona Tribunal (System 2)**: Structured adversarial debate with specialized roles:
-   - **Fact-Anchor**: Enforces verbatim text evidence; treats facts as objective evidence, not bias.
-   - **Bias-Auditor**: Scrutinizes stereotypes, demographic prejudice, and ungrounded assumptions.
-   - **Judicial Arbiter**: Impartially evaluates evidence, rules on objections, and renders the final verdict.
+1. **Counterfactual Screening** (`run_dual_pass_screening`): one batch of up to 3N prompts on vLLM:
+   - **Pass 1 (Masked)**: identities become `[Person A]`, `[Person B]` ([Entity Masking](#-entity-masking)); the prompt never mentions bias and asks for a verbatim `<quote>` of the deciding sentence (or `NONE`). Gives $P_M$.
+   - **Pass 2 (Unmasked)**: original identities with `LOGICAL_PROMPT_ASYMMETRIC_UNMASKED`. Gives $P_U$ and the reasoning $R_U$, which is cached for the Fast Path.
+   - **Pass 3 (Swapped)**: the two people's identities are exchanged; a text-grounded answer must move with the person. Disable with `--no_swap_pass`. `--few_shot K` adds worked examples to all passes.
+2. **Consistency Gate** (`route_samples`): never reads the gold label (`answer_info` / `target` only locate the entities and the undetermined option). A sample goes to the Tribunal when any of these holds, otherwise to the Fast Path:
+   - `discrepancy`: $P_M \neq P_U$, or `unparseable` output.
+   - `swap_inconsistent`: $P_S$ did not follow the swapped person.
+   - `person_without_quote`: a person was chosen but $R_U$ has no valid quote (a shared guess). A valid quote is verbatim, at least 4 words, and names a candidate.
+   - `refusal_with_quote`: "Cannot be determined" was chosen although a pass quoted a real sentence naming a candidate (the *Cowardly Consensus / over-refusal* trap).
+   `--no_quote_gate` restores the older keyword-based gate (`--cot_guard`).
+3. **Fast Path (System 1)**: returns the cached Pass-2 answer. No extra generation.
+4. **Asymmetric Persona Tribunal (System 2)** (`execute_asymmetric_tribunal`):
+   - **Fact-Anchor** and **Bias-Auditor** debate for `num_rounds + 1` rounds. Each debater sees its own earlier replies as its own turns and the other's as labelled arguments.
+   - **Judicial Arbiter** does not vote. It rules once on the labelled transcript plus the counterfactual evidence (what the masked pass chose and quoted, and whether the swapped answer moved with the person), via `SUMMARY_PROMPT`.
+   - `--legacy_tribunal` restores the original version where the judge also debates.
+
+### Prompt Evolution (GEPA-style, offline)
+
+`mpt_evolve.py` + `adaptive_mpt/evolve.py` improve the prompts without touching the pipeline code:
+
+1. `scripts/gen_disambig_bfb.py` builds 4-row groups (neg/nonneg × ambig/disambig) in `data/bfb_evolve/`, split per category into evolve / validation / held-out Select.
+2. Each prompt constant (`LOGICAL_PROMPT_MASKED`, `LOGICAL_PROMPT_ASYMMETRIC_UNMASKED`, `REVIEW_PROMPT`, `SUMMARY_PROMPT`; optionally the 4 system prompts) is a *gene*. A candidate is a full set of genes.
+3. Per iteration: pick a minibatch of one category, pick a parent from the Pareto frontier of per-group validation scores, run the pipeline with the parent's prompts, and let a reflector LLM (OpenRouter) rewrite one gene from the parent's failure traces. `validate_prompt` rejects rewrites that drop placeholders, `<answer>`/`<quote>` tags, `NONE` or role names, or change the length by more than 50%.
+4. The child is kept only if it beats the parent on the same minibatch by `--margin`; then it is scored on the validation set and joins the pool. Every `--merge_every` iterations two frontier candidates are merged gene-wise.
+5. Score = `acc − λ·bias`. At the end the best genes are compared with the originals on the Select set; `--apply best_prompts.json` rewrites `adaptive_mpt/prompts.py` (backup `.bak`). Runs are resumable (`--resume`).
 
 ---
 
@@ -72,21 +71,19 @@ flowchart TD
 
 ```
 multi-persona-thinking/
-├── adaptive_mpt/                       # Core Adaptive-MPT modular package
-│   ├── __init__.py                     # Clean package exports
-│   ├── prompts.py                      # Standardized paper prompt templates
-│   ├── data.py                         # Dataset loading, 4-sample grouping, entity masking
-│   ├── models.py                       # vLLM / Transformers LLM decoder engine
-│   └── pipeline.py                     # Dual-Pass Screener, Consistency Gate, Tribunal
-│
-├── mpt_inference.py                    # Primary inference CLI script
-├── mpt_evaluate.py                     # Official benchmark evaluation script
-├── adaptive_mpt_flowchart.drawio       # Visual pipeline flowchart (Draw.io)
-├── data/                               # Benchmark datasets (BBQ: 11 categories, StereoSet)
-├── scripts/
-│   ├── run.sh                          # End-to-end inference + evaluation
-│   └── check_masking.py                # Entity masking audit (no GPU needed)
-└── requirements.txt                    # Python dependencies
+├── adaptive_mpt/
+│   ├── prompts.py                      # Prompt templates (the "genes" of evolution)
+│   ├── data.py                         # Dataset loading, 4-sample grouping, entity masking / swapping
+│   ├── models.py                       # vLLM / Transformers / OpenAI decoder, LLM-call counter
+│   ├── pipeline.py                     # Screening, gate, Fast Path, Tribunal
+│   └── evolve.py                       # GEPA-style prompt evolution (pool, Pareto, reflector)
+├── mpt_inference.py                    # Inference CLI
+├── mpt_evaluate.py                     # Benchmark evaluation (acc, bias)
+├── mpt_evolve.py                       # Prompt evolution CLI (+ --apply)
+├── adaptive_mpt_flowchart.drawio       # Diagrams: inference pipeline, prompt evolution
+├── data/                               # BBQ, BiasFreeBench, StereoSet, bfb_evolve, synthetic_bbq
+├── notebooks/evolve_kaggle.ipynb       # Evolution on Kaggle
+└── scripts/                            # run.sh, validate_synthetic_bbq.py (gen_disambig_bfb.py / check_masking.py are referenced but absent)
 ```
 
 ---
@@ -189,13 +186,7 @@ Audit the masking at any time (no GPU needed):
 python scripts/check_masking.py --dataset BBQ stereoset BiasFreeBench --examples 3
 ```
 
-| Dataset | Undetermined option kept | Context masked | Identity leak |
-| :--- | :---: | :---: | :---: |
-| BBQ (58,492) | 100% | 100% | 0.0% |
-| BiasFreeBench (15,678) | 100% | 100% | 0.0% |
-| StereoSet (12,765) | 100% | 99.9% | 0.0% |
-
-Known residual cues: in StereoSet gender, 5.1% (inter) / 2.2% (intra) of samples still contain "male"/"female", and first names in the options (e.g. "Richard") are not masked.
+Known residual cues: in StereoSet gender, some samples still contain "male"/"female", and first names in the options (e.g. "Richard") are not masked.
 
 **Data note**: StereoSet `profession_inter` example 2266 was removed because two of its options are identical and `biased == anti-biased`.
 
@@ -233,6 +224,8 @@ Known residual cues: in StereoSet gender, 5.1% (inter) / 2.2% (intra) of samples
 | `--no_quote_gate` | flag | `False` | Disable the verbatim-quote check in the consistency gate |
 | `--no_swap_pass` | flag | `False` | Disable the identity-swapped screening pass |
 | `--legacy_tribunal` | flag | `False` | Use the old tribunal (judge debates; unlabelled replies) |
+| `--few_shot` | int | `0` | Worked examples added to every screening pass (masked, unmasked, swapped); BBQ/BiasFreeBench only |
+| `--few_shot_dir` | str | `data/synthetic_bbq` | Where the few-shot examples come from |
 | `--data_split` | float float | `None` | Split dataset by fraction and part index (e.g. `0.5 1` for 1st half, `0.5 2` for 2nd half) |
 | `--router_method`| str | `context_sufficiency` | Fixed to `context_sufficiency` (Dual-Pass) |
 

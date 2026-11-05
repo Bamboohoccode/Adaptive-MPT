@@ -3,6 +3,7 @@ import argparse
 import json
 import numpy as np
 import pandas as pd
+import re
 import string
 from pathlib import Path
 from tqdm import tqdm
@@ -421,7 +422,8 @@ def main():
             print(f"Method '{method_name}' not found in {path.stem}, skipping.")
             continue
         mets = compute_metrics(df, method_name, dataset)
-        mets['category'] = path.stem.replace("preds_","")
+        # Drop the --data_split suffix: "gender_inter_part1" must still be grouped as "_inter" by process_stereoset
+        mets['category'] = re.sub(r"_part\d+$", "", path.stem.replace("preds_",""))
         summary.append(mets)
 
     all_records = []
