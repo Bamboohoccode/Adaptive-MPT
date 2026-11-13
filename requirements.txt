@@ -6,3 +6,4 @@ numpy==2.1.2
 pandas==2.3.2
 tqdm==4.67.1
 xopen==2.0.2
+gepa==0.1.4
