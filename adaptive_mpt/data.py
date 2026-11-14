@@ -442,7 +442,7 @@ def save_dataset_records(sample_records, category_manifest):
             line.pop('_output_file', None)
             line.pop('_ce_scores', None)
             line.pop('_ce_labels', None)
-            # Keep the gate's inputs (masked/swapped answers, quote checks, route) so routing can be audited offline
+            # Keep the gate's inputs (masked/unmasked answers, quote checks, route) so routing can be audited offline
             screen = line.pop('_screen', None)
             if screen is not None:
                 line['screening'] = screen

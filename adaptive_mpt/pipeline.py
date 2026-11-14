@@ -29,7 +29,7 @@ from adaptive_mpt.prompts import (
     SUMMARY_PROMPT,
     REVIEW_PROMPT
 )
-from adaptive_mpt.data import mask_entities, swap_entities, get_undetermined_index
+from adaptive_mpt.data import mask_entities, get_undetermined_index
 from adaptive_mpt.models import format_prompt, format_messages, decode_batch, get_pred
 
 def task_prompt(args, input_example):
@@ -137,8 +137,8 @@ def build_few_shot_demos(args):
 
     Demo i is disambiguated when i is even and ambiguous when odd, alternates neg/nonneg questions, cycles through
     categories, and has its options permuted so the correct answer sits at position i % 3 (the synthetic files always
-    put "unknown" last). Each demo exists in an unmasked form (used by the unmasked AND the swapped pass, so the swap
-    test compares prompts that differ only in the question's identities) and a masked form (used by the masked pass).
+    put "unknown" last). Each demo exists in an unmasked form (used by the unmasked pass) and a masked form (used by the
+    masked pass).
     Returns {"unmasked": [(item, response)], "masked": [(item, response)]}, or None when few-shot is off.
     """
     k = getattr(args, "few_shot", 0)
@@ -202,41 +202,31 @@ def _screen_prompt(args, item, masked, demos):
     return format_messages(args, messages, DEFAULT_SYS_PROMPT)
 
 def run_dual_pass_screening(args, models, sample_records):
-    """Component 1: Counterfactual Batch Inference (masked, unmasked and identity-swapped passes in one batch).
+    """Component 1: Counterfactual Dual-Pass Batch Inference (masked and unmasked passes in one 2N batch).
 
     Pass 1 (Masked Logic): [Person A], [Person B] with LOGICAL_PROMPT_MASKED -> P_M
     Pass 2 (Unmasked CoT): Original identities with LOGICAL_PROMPT_ASYMMETRIC_UNMASKED -> P_U, R_U
-    Pass 3 (Swapped, unless --no_swap_pass): the two people's identities exchanged -> P_S, expected index_map[P_U]
-    With --few_shot K, all three passes get the same K worked examples (masked ones for the masked pass).
-    Per-sample screening details (predictions, quote checks, raw masked/swapped responses) go to record["_screen"].
+    With --few_shot K, both passes get the same K worked examples (masked ones for the masked pass).
+    Per-sample screening details (predictions, quote checks, raw masked response) go to record["_screen"].
     """
     total_samples = len(sample_records)
-    swap_enabled = getattr(args, "swap_pass", True)
-    print(f"\n--- Phase 1: Counterfactual Screening (masked + unmasked{' + swapped' if swap_enabled else ''}) ---")
+    print("\n--- Phase 1: Counterfactual Dual-Pass Screening (masked + unmasked) ---")
 
     counterfactual_masked_inputs = [mask_entities(it) for it in sample_records]
-    swaps = [swap_entities(it) if swap_enabled else (None, None) for it in sample_records]
     demos = build_few_shot_demos(args)
 
     masked_prompts = []
     unmasked_prompts = []
-    swap_prompts, swap_owners = [], []
     for i in range(total_samples):
         masked_prompts.append(_screen_prompt(args, counterfactual_masked_inputs[i], True, demos))
         unmasked_prompts.append(_screen_prompt(args, sample_records[i], False, demos))
 
-        swapped, _ = swaps[i]
-        if swapped is not None:
-            swap_prompts.append(_screen_prompt(args, swapped, False, demos))
-            swap_owners.append(i)
-
-    # Single unified batch execution on vLLM
-    batch_prompts = masked_prompts + unmasked_prompts + swap_prompts
+    # Single unified batch execution on vLLM (2N prompts)
+    batch_prompts = masked_prompts + unmasked_prompts
     batch_responses = decode_batch(models, args, batch_prompts, phase="dual_pass_batch_turn1")
 
     masked_responses = batch_responses[:total_samples]
-    unmasked_responses = batch_responses[total_samples:2 * total_samples]
-    swap_responses = dict(zip(swap_owners, batch_responses[2 * total_samples:]))
+    unmasked_responses = batch_responses[total_samples:]
 
     p_masked = []
     p_unmasked = []
@@ -261,10 +251,6 @@ def run_dual_pass_screening(args, models, sample_records):
             "quote_m": extract_quote(masked_responses[i]),
             "masked_response": masked_responses[i],
         }
-        if i in swap_responses:
-            screen["p_s"] = get_pred(swap_responses[i])
-            screen["p_s_expected"] = swaps[i][1].get(pu, -1)
-            screen["swap_response"] = swap_responses[i]
         sample_records[i]["_screen"] = screen
 
     return p_masked, p_unmasked, cot_unmasked, fast_path_cache
@@ -283,8 +269,7 @@ def _legacy_over_refusal(cot):
 def route_samples(args, sample_records, p_masked, p_unmasked, cot_unmasked):
     """Component 2: Consistency Gate.
 
-    Tribunal when: the masked and unmasked answers differ; either is unparseable; the swapped answer does not
-    follow the person; both pick a person but the unmasked pass quoted no real deciding sentence (a shared guess);
+    Tribunal when: the masked and unmasked answers differ; either is unparseable; both pick a person but the unmasked pass quoted no real deciding sentence (a shared guess);
     or both pick "unknown" although a pass quoted a real sentence naming a candidate (a likely over-refusal).
     --no_quote_gate restores the old gate (with the optional --cot_guard keyword check).
     """
@@ -308,8 +293,6 @@ def route_samples(args, sample_records, p_masked, p_unmasked, cot_unmasked):
             reason = "discrepancy"
         elif pu == -1:
             reason = "unparseable"
-        elif "p_s" in screen and screen["p_s"] != screen["p_s_expected"]:
-            reason = "swap_inconsistent"
         elif quote_gate:
             if pu != u_idx and not screen.get("vq_u"):
                 reason = "person_without_quote"
@@ -375,7 +358,7 @@ def _debater_messages(round_prompts, replies, round_idx, agent_id):
     return messages
 
 def _identity_blind_exhibit(item, screen):
-    """What the masked and swapped passes found, for the judge; empty when nothing was recorded."""
+    """What the masked pass found, for the judge; empty when nothing was recorded."""
     lines = []
     pm = screen.get("p_m", -1)
     if pm in (0, 1, 2):
@@ -383,11 +366,6 @@ def _identity_blind_exhibit(item, screen):
                      f"placeholders and chose option {pm} ({item[f'ans{pm}']}).")
         if screen.get("vq_m"):
             lines.append(f"It cited this sentence of the context: \"{screen['quote_m']}\"")
-    if "p_s" in screen and screen.get("p_u", -1) in (0, 1, 2):
-        moved = screen["p_s"] == screen["p_s_expected"]
-        lines.append("When the two people's identities were swapped in the context, the answer "
-                     + ("moved with the person, as a text-grounded answer should." if moved
-                        else "did not move with the person."))
     return ("Evidence from counterfactual checks:\n" + "\n".join(lines)) if lines else ""
 
 def execute_asymmetric_tribunal(args, models, tribunal_indices, sample_records, experiment_signature):
@@ -395,7 +373,7 @@ def execute_asymmetric_tribunal(args, models, tribunal_indices, sample_records, 
 
     Fact-Anchor and Bias-Auditor debate for num_rounds + 1 rounds, each seeing its own earlier replies as its
     own turns and the other's replies as labelled arguments; the Judicial Arbiter does not vote, and rules once
-    on the labelled transcript plus the masked/swapped evidence. --legacy_tribunal restores the old version.
+    on the labelled transcript plus the masked-pass evidence. --legacy_tribunal restores the old version.
     """
     if getattr(args, "legacy_tribunal", False):
         return _execute_legacy_tribunal(args, models, tribunal_indices, sample_records, experiment_signature)

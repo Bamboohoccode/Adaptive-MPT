@@ -389,7 +389,6 @@ def parse_arguments():
     p.add_argument("--max_tokens", type=int, default=768)
     p.add_argument("--num_rounds", type=int, default=2, help="tribunal debate rounds")
     p.add_argument("--no_quote_gate", dest="quote_gate", action="store_false")
-    p.add_argument("--no_swap_pass", dest="swap_pass", action="store_false")
     p.add_argument("--cot_guard", action="store_true")
     args = p.parse_args()
 

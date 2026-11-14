@@ -78,10 +78,8 @@ def parse_arguments():
                         help="Optional CoT keyword scanning to rescue potential over-refusal in Pass 2 (only with --no_quote_gate)")
     parser.add_argument("--no_quote_gate", dest="quote_gate", action="store_false",
                         help="Disable the verbatim-quote check in the consistency gate (restores the old routing)")
-    parser.add_argument("--no_swap_pass", dest="swap_pass", action="store_false",
-                        help="Disable the identity-swapped screening pass")
     parser.add_argument("--few_shot", type=int, default=0,
-                        help="Worked examples added to every screening pass (masked, unmasked, swapped); BBQ/BiasFreeBench only")
+                        help="Worked examples added to both screening passes (masked, unmasked); BBQ/BiasFreeBench only")
     parser.add_argument("--few_shot_dir", type=str, default="data/synthetic_bbq",
                         help="BBQ-format JSONL files the few-shot examples are drawn from (keep them out of the test data)")
     parser.add_argument("--legacy_tribunal", action="store_true",

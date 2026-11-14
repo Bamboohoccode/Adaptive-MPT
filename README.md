@@ -18,19 +18,18 @@ Full diagrams (inference pipeline + prompt evolution): [adaptive_mpt_flowchart.d
 flowchart TD
     In["Input (Context, Question, Options)"]
 
-    subgraph S1 ["Component 1: Counterfactual Screening (one batch)"]
+    subgraph S1 ["Component 1: Counterfactual Dual-Pass Screening (one 2N batch)"]
         In --> PassM["Pass 1 Masked: [Person A]/[Person B]<br/>LOGICAL_PROMPT_MASKED -> P_M, quote_M"]
         In --> PassU["Pass 2 Unmasked: original identities<br/>ASYMMETRIC_UNMASKED -> P_U, R_U"]
-        In --> PassS["Pass 3 Swapped: identities exchanged<br/>-> P_S (expected: follows the person)"]
     end
 
-    PassM & PassU & PassS --> Gate{"Component 2: Consistency Gate"}
+    PassM & PassU --> Gate{"Component 2: Consistency Gate"}
 
     Gate -- "all checks pass" --> FP["Component 3: Fast Path<br/>cached Pass-2 answer, 0 extra calls"]
     Gate -- "any check fails" --> T
 
     subgraph S4 ["Component 4: Asymmetric Persona Tribunal"]
-        T["Fact-Anchor vs Bias-Auditor<br/>num_rounds + 1 debate rounds"] --> Judge["Judicial Arbiter<br/>rules once, sees masked/swap evidence<br/>-> answer"]
+        T["Fact-Anchor vs Bias-Auditor<br/>num_rounds + 1 debate rounds"] --> Judge["Judicial Arbiter<br/>rules once, sees masked-pass evidence<br/>-> answer"]
     end
 
     FP --> Out["Final Prediction"]
@@ -39,20 +38,19 @@ flowchart TD
 
 ### The 4 Core Components
 
-1. **Counterfactual Screening** (`run_dual_pass_screening`): one batch of up to 3N prompts on vLLM:
+1. **Counterfactual Dual-Pass Screening** (`run_dual_pass_screening`): one batch of 2N prompts on vLLM:
    - **Pass 1 (Masked)**: identities become `[Person A]`, `[Person B]` ([Entity Masking](#-entity-masking)); the prompt never mentions bias and asks for a verbatim `<quote>` of the deciding sentence (or `NONE`). Gives $P_M$.
    - **Pass 2 (Unmasked)**: original identities with `LOGICAL_PROMPT_ASYMMETRIC_UNMASKED`. Gives $P_U$ and the reasoning $R_U$, which is cached for the Fast Path.
-   - **Pass 3 (Swapped)**: the two people's identities are exchanged; a text-grounded answer must move with the person. Disable with `--no_swap_pass`. `--few_shot K` adds worked examples to all passes.
+   - `--few_shot K` adds worked examples to both passes.
 2. **Consistency Gate** (`route_samples`): never reads the gold label (`answer_info` / `target` only locate the entities and the undetermined option). A sample goes to the Tribunal when any of these holds, otherwise to the Fast Path:
    - `discrepancy`: $P_M \neq P_U$, or `unparseable` output.
-   - `swap_inconsistent`: $P_S$ did not follow the swapped person.
    - `person_without_quote`: a person was chosen but $R_U$ has no valid quote (a shared guess). A valid quote is verbatim, at least 4 words, and names a candidate.
    - `refusal_with_quote`: "Cannot be determined" was chosen although a pass quoted a real sentence naming a candidate (the *Cowardly Consensus / over-refusal* trap).
    `--no_quote_gate` restores the older keyword-based gate (`--cot_guard`).
 3. **Fast Path (System 1)**: returns the cached Pass-2 answer. No extra generation.
 4. **Asymmetric Persona Tribunal (System 2)** (`execute_asymmetric_tribunal`):
    - **Fact-Anchor** and **Bias-Auditor** debate for `num_rounds + 1` rounds. Each debater sees its own earlier replies as its own turns and the other's as labelled arguments.
-   - **Judicial Arbiter** does not vote. It rules once on the labelled transcript plus the counterfactual evidence (what the masked pass chose and quoted, and whether the swapped answer moved with the person), via `SUMMARY_PROMPT`.
+   - **Judicial Arbiter** does not vote. It rules once on the labelled transcript plus the counterfactual evidence (what the masked pass chose and quoted), via `SUMMARY_PROMPT`.
    - `--legacy_tribunal` restores the original version where the judge also debates.
 
 ### Prompt Evolution (GEPA-style, offline)
@@ -73,7 +71,7 @@ flowchart TD
 multi-persona-thinking/
 ├── adaptive_mpt/
 │   ├── prompts.py                      # Prompt templates (the "genes" of evolution)
-│   ├── data.py                         # Dataset loading, 4-sample grouping, entity masking / swapping
+│   ├── data.py                         # Dataset loading, 4-sample grouping, entity masking
 │   ├── models.py                       # vLLM / Transformers / OpenAI decoder, LLM-call counter
 │   ├── pipeline.py                     # Screening, gate, Fast Path, Tribunal
 │   └── evolve.py                       # GEPA-style prompt evolution (pool, Pareto, reflector)
@@ -222,9 +220,8 @@ Known residual cues: in StereoSet gender, some samples still contain "male"/"fem
 | `--overwrite` | flag | `False` | Overwrite existing prediction JSONL files |
 | `--cot_guard` | flag | `False` | Optional CoT keyword scanning to rescue over-refusal in Pass 2 (only with `--no_quote_gate`) |
 | `--no_quote_gate` | flag | `False` | Disable the verbatim-quote check in the consistency gate |
-| `--no_swap_pass` | flag | `False` | Disable the identity-swapped screening pass |
 | `--legacy_tribunal` | flag | `False` | Use the old tribunal (judge debates; unlabelled replies) |
-| `--few_shot` | int | `0` | Worked examples added to every screening pass (masked, unmasked, swapped); BBQ/BiasFreeBench only |
+| `--few_shot` | int | `0` | Worked examples added to both screening passes (masked, unmasked); BBQ/BiasFreeBench only |
 | `--few_shot_dir` | str | `data/synthetic_bbq` | Where the few-shot examples come from |
 | `--data_split` | float float | `None` | Split dataset by fraction and part index (e.g. `0.5 1` for 1st half, `0.5 2` for 2nd half) |
 | `--router_method`| str | `context_sufficiency` | Fixed to `context_sufficiency` (Dual-Pass) |
